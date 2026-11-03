@@ -47,6 +47,13 @@ class DatabaseSettingsTest {
         assertEquals("na1", settings(serverName = "  na1 ").serverName)
     }
 
+    /** Runs on each loader the build targets, so a renamed config type fails here rather than leaking the password. */
+    @Test
+    fun `the config uses the loader's type that stays off clients`() {
+        val expected = if ("LOCAL" in net.neoforged.fml.config.ModConfig.Type.values().map { it.name }) "LOCAL" else "COMMON"
+        assertEquals(expected, NeoPlayerSync.localConfigType().name)
+    }
+
     @Test
     fun `the password never appears in text or errors`() {
         assertFalse("secret-value" in settings().toString())

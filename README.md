@@ -15,12 +15,21 @@ Position, spawn point, advancements and statistics stay on each server.
 
 ## What you need
 
-- Minecraft 26.3 with NeoForge 26.3.0.99 or newer
+- Minecraft 26.1.2, 26.2 or 26.3, with the matching jar:
+
+  | Minecraft | NeoForge | Jar |
+  | --- | --- | --- |
+  | 26.1.2 | 26.1.2.114 or newer | `neoplayersync-<version>+26.1.jar` |
+  | 26.2 | 26.2.0.88 or newer | `neoplayersync-<version>+26.2.jar` |
+  | 26.3 | 26.3.0.99 or newer | `neoplayersync-<version>+26.3.jar` |
+
 - [Kotlin for Forge](https://www.curseforge.com/minecraft/mc-mods/kotlin-for-forge) 6.4.0
 - a PostgreSQL server (we test with 17.6)
 - a proxy such as Velocity, with player forwarding set up
 
 Players don't install anything. The proxy doesn't need the mod either.
+
+Run the same Minecraft version on every server of a network. A server refuses to load a character that a newer version saved.
 
 ## Setup
 
@@ -130,7 +139,7 @@ You need Java 25. On Windows:
 .\tools\run-gradle.ps1 build
 ```
 
-The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`.
+The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`. It builds the 26.3 jar into `build/libs`. Add `-Pmc=26.1` or `-Pmc=26.2` to build for another version.
 
 Some tests need a real database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
 
@@ -139,6 +148,12 @@ Some tests need a real database. Unpack the PostgreSQL Windows binaries so that 
 .\tools\run-gradle.ps1 build
 .\tools\run-gradle.ps1 runGameTestServer --project-prop=includeGameTests=true
 .\tools\test-postgres.ps1 stop
+```
+
+Add the same `-Pmc=` to test another version, for example:
+
+```powershell
+.\tools\run-gradle.ps1 build runGameTestServer -Pmc=26.1 --project-prop=includeGameTests=true
 ```
 
 The script runs a throwaway database on `127.0.0.1:5433`. Without it, the database tests skip themselves.

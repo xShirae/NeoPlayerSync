@@ -4,8 +4,18 @@ plugins {
     id 'net.neoforged.moddev' version '2.0.148'
 }
 
+// One source builds for each Minecraft line, against the NeoForge release its tests ran on. Pick one with -Pmc=26.1.
+def targets = [
+        '26.1': [neo: '26.1.2.114', minecraftRange: '[26.1.2,26.2)', neoRange: '[26.1.2.114,26.2)'],
+        '26.2': [neo: '26.2.0.88', minecraftRange: '[26.2,26.3)', neoRange: '[26.2.0.88,26.3)'],
+        '26.3': [neo: '26.3.0.99', minecraftRange: '[26.3,26.4)', neoRange: '[26.3.0.99,26.4)'],
+]
+def mc = providers.gradleProperty('mc').getOrElse('26.3')
+def target = targets[mc]
+if (target == null) throw new GradleException("Unknown -Pmc=${mc}. Use one of ${targets.keySet()}.")
+
 group = mod_group_id
-version = mod_version
+version = "${mod_version}+${mc}"
 
 base {
     archivesName = mod_id
@@ -32,7 +42,7 @@ dependencies {
 }
 
 neoForge {
-    version = neo_version
+    version = target.neo
 
     mods {
         "${mod_id}" {
@@ -45,19 +55,20 @@ neoForge {
         server {
             server()
             programArgument '--nogui'
-            gameDirectory = file('run/server')
+            gameDirectory = file("run/${mc}")
         }
         if (providers.gradleProperty('includeGameTests').isPresent()) {
+            // Each line keeps its own world, because an older game cannot load a world a newer one saved.
             gameTestServer {
                 type = 'gameTestServer'
                 sourceSet = sourceSets.test
-                gameDirectory = file('build/game-test/server')
+                gameDirectory = file("build/game-test/${mc}/server")
                 programArgument '--tests'
                 programArgument "${mod_id}:*"
                 programArgument '--report'
-                programArgument file('build/game-test/report.xml').absolutePath
+                programArgument file("build/game-test/${mc}/report.xml").absolutePath
                 programArgument '--universe'
-                programArgument file('build/game-test/universe').absolutePath
+                programArgument file("build/game-test/${mc}/universe").absolutePath
             }
         }
     }
@@ -71,10 +82,10 @@ neoForge {
 tasks.named('processResources', ProcessResources).configure {
     def replaceProperties = [
             loader_version_range   : loader_version_range,
-            minecraft_version_range: minecraft_version_range,
-            neo_version_range      : neo_version_range,
+            minecraft_version_range: target.minecraftRange,
+            neo_version_range      : target.neoRange,
             mod_id                 : mod_id,
-            mod_version            : mod_version,
+            mod_version            : version,
             mod_name               : mod_name,
             mod_license            : mod_license,
             mod_authors            : mod_authors,

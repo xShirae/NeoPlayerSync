@@ -10,8 +10,7 @@ import org.slf4j.Logger
 @Mod(NeoPlayerSync.MOD_ID)
 class NeoPlayerSync(modBus: IEventBus, modContainer: ModContainer) {
     init {
-        // LOCAL, because the file holds a password and NeoForge sends SYNCED configs to clients.
-        modContainer.registerConfig(ModConfig.Type.LOCAL, DatabaseConfig.SPEC, CONFIG_FILE)
+        modContainer.registerConfig(localConfigType(), DatabaseConfig.SPEC, CONFIG_FILE)
         modBus.addListener(PlayerDataSync::registerLoadTask)
     }
 
@@ -33,5 +32,13 @@ class NeoPlayerSync(modBus: IEventBus, modContainer: ModContainer) {
 
         @JvmField
         val LOGGER: Logger = LogUtils.getLogger()
+
+        /**
+         * The config file holds a password, so it needs a type NeoForge never sends to clients. The 26.3 loader calls
+         * that type LOCAL, and the 26.1 and 26.2 loaders call it COMMON. Looking it up by name lets one source build
+         * for all three.
+         */
+        internal fun localConfigType(): ModConfig.Type =
+            ModConfig.Type.values().firstOrNull { it.name == "LOCAL" } ?: ModConfig.Type.valueOf("COMMON")
     }
 }
