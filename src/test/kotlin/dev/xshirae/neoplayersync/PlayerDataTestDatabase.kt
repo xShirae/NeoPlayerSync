@@ -5,7 +5,7 @@ import java.sql.Connection
 import java.sql.SQLException
 
 /**
- * tools/test-postgres.ps1's database, inside a schema of its own, so a real database's tables are never touched.
+ * tools/test-postgres.ps1's database, inside a schema of its own, so tests never touch a real database's tables.
  * Tests using it skip when that database is not running, so check the report before claiming they ran.
  */
 internal class PlayerDataTestDatabase(val schema: String) : AutoCloseable {

@@ -24,7 +24,7 @@ object PlayerDataSync {
             NeoPlayerSync.LOGGER.warn("${NeoPlayerSync.CONFIG_FILE} has enabled = true, but only a dedicated server uses Postgres. Using local files.")
             return
         }
-        // Stopping here is deliberate: falling back to local files would split a player's data across servers.
+        // Startup fails here on purpose. Falling back to local files would split a player's data across servers.
         val settings = DatabaseConfig.settings()
         val claimStore = PlayerDataStore(settings::connect)
         claimStore.prepareTables()

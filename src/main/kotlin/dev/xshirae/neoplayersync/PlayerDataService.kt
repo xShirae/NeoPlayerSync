@@ -22,7 +22,7 @@ internal class PlayerDataSession(
     val playerId: UUID,
     val sessionId: UUID,
     val connected: () -> Boolean,
-    /** The stored character, until other mods have been told how old it is. */
+    /** The stored character, until [PlayerDataService.onLoaded] tells other mods how old it is. */
     var unshiftedSave: SavedPlayer?,
 ) {
     /** When the claim returned, so time spent finishing the join also counts against cooldowns. */
@@ -70,13 +70,13 @@ internal class PlayerDataService(
         )
     }
 
-    /** Takes the whole claim, so the stored save that [onLoaded] reports cannot be left out on the way. */
+    /** Takes the whole claim, so no caller can drop the stored save that [onLoaded] reports. */
     fun addSession(playerId: UUID, sessionId: UUID, claim: PlayerClaim? = null, connected: () -> Boolean) {
         sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved)
     }
 
     /**
-     * Vanilla has just read the player's file. Game time differs between servers, so this tells other mods how old the
+     * Vanilla has read the player's file. Each server counts its own game time, so this tells other mods how old the
      * save is and which clock it came from, once per join, for timers such as cooldowns.
      */
     fun onLoaded(player: ServerPlayer) {
@@ -96,7 +96,7 @@ internal class PlayerDataService(
         watchInventory(player, session)
     }
 
-    /** Respawning builds a new player with a new inventory menu, and dying has just emptied the old one. */
+    /** Respawning builds a new player with a new inventory menu, and death emptied the old one. */
     fun onRespawn(player: ServerPlayer) {
         val session = sessions[player.uuid] ?: return
         watchInventory(player, session)
@@ -104,8 +104,8 @@ internal class PlayerDataService(
     }
 
     /**
-     * The inventory listener hears nothing while another menu is open, and the ender chest has no listener at all.
-     * Clients can send a close packet at any time, so this must stay under the save cap rather than save at once.
+     * The inventory listener hears nothing while another menu is open, and the ender chest has no listener.
+     * A client can send close packets whenever it likes, so this marks the player for a capped save instead.
      */
     fun onContainerClosed(player: ServerPlayer) {
         sessions[player.uuid]?.inventoryChanged = true
@@ -115,7 +115,7 @@ internal class PlayerDataService(
         sessions[player.uuid]?.closing = true
     }
 
-    /** Vanilla just wrote this player's file. Every save, whatever triggered it, reaches the database through here. */
+    /** Vanilla wrote this player's file. Every save reaches the database through here, whatever triggered it. */
     fun onSaved(event: PlayerEvent.SaveToFile) {
         val session = sessions[event.entity.uuid] ?: return
         val data = try {
@@ -168,7 +168,7 @@ internal class PlayerDataService(
         for (session in sessions.values) {
             when {
                 !session.inWorld && !session.connected() -> {
-                    // The client left during configuration, so no logout event or save will ever come.
+                    // The client left during configuration, so no logout event or save will follow.
                     sessions.remove(session.playerId, session)
                     giveUpClaim(session)
                 }
@@ -195,7 +195,7 @@ internal class PlayerDataService(
         server.playerList.playerIo.save(player)
     }
 
-    /** Vanilla's save swallows its own failures and then fires no event. Without this, the player could join nowhere. */
+    /** Vanilla's save swallows its own failures and then fires no event. Without this, no server could load the player again. */
     private fun releaseFailedLogouts() {
         for (session in sessions.values) {
             if (!session.closing) continue
@@ -213,7 +213,7 @@ internal class PlayerDataService(
         try {
             claimStore.heartbeat(sessions.values.mapTo(HashSet()) { it.sessionId } + writer.sessionsWithUnsentWrites())
         } catch (exception: Exception) {
-            // Another server takes over only after the lease goes unrenewed for a while, and saves keep working until then.
+            // Another server takes over after the lease goes 12 seconds without renewal, and saves keep working until then.
             NeoPlayerSync.LOGGER.warn("Could not renew player data leases", exception)
         }
     }
@@ -230,7 +230,7 @@ internal class PlayerDataService(
     }
 
     private fun shutDown(executor: ScheduledThreadPoolExecutor, store: PlayerDataStore) {
-        // The connection is not safe to share, so its own thread closes it after any work already queued.
+        // Only its own thread may use the connection, so that thread closes it after the queued work.
         executor.execute { store.close() }
         executor.shutdown()
         if (!executor.awaitTermination(STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {

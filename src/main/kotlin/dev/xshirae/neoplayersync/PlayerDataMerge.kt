@@ -11,7 +11,7 @@ import java.io.ByteArrayInputStream
 
 /** Decides which parts of a stored character replace the parts of this server's own save file. */
 internal object PlayerDataMerge {
-    /** Listed explicitly, so a new vanilla key stays on each server until someone decides it should travel. */
+    /** A fixed list, so a new vanilla key stays on each server until someone adds it here. */
     val TRAVELLING_KEYS: Set<String> = setOf(
         "Inventory",
         "SelectedItemSlot",
@@ -47,7 +47,7 @@ internal object PlayerDataMerge {
         return DataFixTypes.PLAYER.updateToCurrentVersion(fixer, tag, version)
     }
 
-    /** Both tags must already be upgraded. A travelling key missing from [stored] is removed, such as an effect that ended. */
+    /** Upgrade both tags first. The merge drops a travelling key that [stored] lacks, such as an effect that ended. */
     fun merge(stored: CompoundTag, local: CompoundTag?): CompoundTag {
         val merged = local?.copy() ?: CompoundTag()
         for (key in TRAVELLING_KEYS) {

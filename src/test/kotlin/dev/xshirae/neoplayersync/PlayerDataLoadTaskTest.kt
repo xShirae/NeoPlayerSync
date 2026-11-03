@@ -289,7 +289,7 @@ class PlayerDataLoadTaskTest {
         storeCharacter(bytesOf(currentSave("XpLevel" to 30)))
         val local = bytesOf(currentSave("XpLevel" to 5))
         localFile.writeBytes(local)
-        // A folder with a file in it cannot be replaced by the backup step, so the swap fails.
+        // The backup step cannot replace a folder that holds a file, so the swap fails.
         val blockedBackup = folder.resolve("$player.dat_old")
         Files.createDirectory(blockedBackup)
         Files.writeString(blockedBackup.resolve("blocker"), "x")

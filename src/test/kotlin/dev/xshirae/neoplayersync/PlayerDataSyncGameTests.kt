@@ -98,7 +98,7 @@ object PlayerDataSyncGameTests {
         Fixture(helper, database, service).test()
     }
 
-    /** The listener is the only way pickups are noticed, because vanilla's inventory change counter never moves for them. */
+    /** Only the listener notices pickups, because vanilla's inventory change counter never moves for them. */
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-listener")
     fun everyKindOfInventoryChangeReachesASlotListener(helper: GameTestHelper) {
@@ -219,7 +219,7 @@ object PlayerDataSyncGameTests {
         }
     }
 
-    /** Client close packets are not limited by vanilla, so they must never force more saves than the cap allows. */
+    /** Vanilla puts no limit on client close packets, so they must never force more saves than the cap allows. */
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-close")
     fun closingContainersStaysUnderTheCap(helper: GameTestHelper) = withDatabase(helper) {

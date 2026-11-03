@@ -6,7 +6,7 @@ import java.sql.SQLException
 import java.sql.Types
 import java.util.UUID
 
-/** The bytes of a player's save file and when they were written. */
+/** The bytes of a player's save file and when the game wrote them. */
 internal class SavedPlayer(val data: ByteArray, val savedTick: Long, val elapsedMillis: Long)
 
 /** A successful claim. [saved] is null until the player's first save. */
@@ -50,9 +50,9 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
     }
 
     /**
-     * Returns null while another session holds this player. An expired lease is only taken over when it still equals
-     * [staleLease], a value from [leaseOf] that the caller has watched stay unchanged. Expiry alone is not enough: after
-     * a database outage every lease has expired, and the holder may still have a save waiting to be sent.
+     * Returns null while another session holds this player. This takes over an expired lease only when it still equals
+     * [staleLease], a value from [leaseOf] that the caller watched stay unchanged. After a database outage every lease
+     * has expired while holders may still have saves waiting, so expiry proves nothing.
      */
     fun claim(playerId: UUID, sessionId: UUID, serverName: String, staleLease: Long? = null): PlayerClaim? = withConnection { connection ->
         connection.prepareStatement(CLAIM).use { statement ->
@@ -82,7 +82,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
 
     /**
      * Returns false if this session no longer owns the player. [ageMillis] is how long the save waited before this write,
-     * so the stored time is when the game saved, not when the database was reachable again.
+     * so the stored time is when the game saved.
      */
     fun save(playerId: UUID, sessionId: UUID, data: ByteArray, savedTick: Long, ageMillis: Long = 0L): Boolean =
         writeSave(SAVE, playerId, sessionId, data, savedTick, ageMillis)
@@ -149,7 +149,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
     }
 
     companion object {
-        /** Raised when the meaning of the saved bytes changes, so an older build refuses data it cannot read. */
+        /** Raise this when the meaning of the saved bytes changes, so an older build refuses data it cannot read. */
         const val PLAYER_DATA_SCHEMA = 1
 
         /** The word "NeoSync" as a number, a key that other programs sharing this database are unlikely to use. */

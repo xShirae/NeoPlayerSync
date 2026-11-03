@@ -4,7 +4,7 @@ import java.util.UUID
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
-/** One player's next database write. No [data] means the claim is given up without saving. */
+/** One player's next database write. Without [data], the write gives up the claim without saving. */
 internal class PlayerWrite(
     val playerId: UUID,
     val sessionId: UUID,
@@ -14,7 +14,7 @@ internal class PlayerWrite(
     /** When the game saved [data], on this server's own clock, so time spent waiting for the database still counts. */
     val savedAtNanos: Long = System.nanoTime(),
 ) {
-    /** A newer save replaces an unsent one, but a release is never forgotten. */
+    /** A newer save replaces an unsent one and keeps any pending release. */
     fun mergedWith(newer: PlayerWrite): PlayerWrite {
         val newerData = newer.data != null
         return PlayerWrite(
@@ -31,8 +31,8 @@ internal class PlayerWrite(
 }
 
 /**
- * Sends saves in order on one thread, so a slow database never holds up the server thread. A failed write is kept and
- * retried, and its session keeps being renewed, so the player stays claimed rather than loading old data elsewhere.
+ * Sends saves in order on one thread, so a slow database never holds up the server thread. The writer keeps and
+ * retries a failed write, and the heartbeat keeps renewing its session, so no other server loads old data while it waits.
  */
 internal class PlayerDataWriter(
     private val store: PlayerDataStore,

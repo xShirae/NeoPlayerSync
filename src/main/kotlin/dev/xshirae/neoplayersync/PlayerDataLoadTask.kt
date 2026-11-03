@@ -70,7 +70,7 @@ internal class PlayerDataLoadTask(
 ) : ICustomConfigurationTask {
     private val sessionId: UUID = UUID.randomUUID()
 
-    // Only touched by attemptClaim, which runs on the single claims thread.
+    // Only attemptClaim uses these, and it runs on the single claims thread.
     private var watchedLease: Long? = null
     private var watchedSinceNanos = 0L
 
@@ -169,14 +169,14 @@ internal class PlayerDataLoadTask(
         val TYPE = ConfigurationTask.Type("${NeoPlayerSync.MOD_ID}:load")
 
         /**
-         * Longer than both the 15-second lease and [STALE_MILLIS], so a crashed server's claim is always taken over in
-         * time: the watch starts with the first attempt, and the lease runs out at most 15 seconds after it.
+         * Longer than both the 15-second lease and [STALE_MILLIS]. The watch starts with the first attempt and the lease
+         * runs out at most 15 seconds later, so this task takes over a crashed server's claim before it gives up.
          */
         private const val WAIT_MILLIS = 20_000L
 
         /**
-         * Two 5-second heartbeats plus room for a slow reconnect. A running server renews within this time once the
-         * database is back, even if every lease expired during the outage, so its waiting save is never shut out.
+         * Two 5-second heartbeats plus room for a slow reconnect. Once the database is back, a running server renews within
+         * this time, even after an outage expired every lease, so its waiting save lands before another server takes over.
          */
         private const val STALE_MILLIS = 12_000L
         private const val POLL_MILLIS = 250L

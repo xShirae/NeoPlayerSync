@@ -5,7 +5,7 @@ import java.sql.Connection
 import java.sql.Driver
 import java.util.Properties
 
-/** Registered as a LOCAL config, see [NeoPlayerSync]. */
+/** [NeoPlayerSync] registers this as a LOCAL config, because it holds the database password. */
 internal object DatabaseConfig {
     private val builder = ModConfigSpec.Builder()
 
@@ -49,7 +49,7 @@ internal object DatabaseConfig {
     )
 }
 
-/** Not a data class, so the generated toString cannot put the password in a log. */
+/** A plain class, so no generated toString can write the password into a log. */
 internal class DatabaseSettings private constructor(
     private val host: String,
     private val port: Int,
@@ -68,7 +68,7 @@ internal class DatabaseSettings private constructor(
             setProperty("socketTimeout", SOCKET_TIMEOUT_SECONDS)
             setProperty("ApplicationName", "NeoPlayerSync")
         }
-        // Typed as the interface because org.postgresql.Driver's signature names an annotation that is not on the compile path.
+        // The interface type avoids org.postgresql.Driver's signature, which names an annotation missing from the compile path.
         val driver: Driver = org.postgresql.Driver()
         return checkNotNull(driver.connect("jdbc:postgresql://$host:$port/$database", properties)) {
             "The Postgres driver rejected the connection URL."
