@@ -1,0 +1,11 @@
+.gradle/
+.kotlin/
+build/
+run/
+out/
+.idea/
+*.iml
+
+# Portable tools for local testing, see the README.
+/tools/postgres/
+/tools/java25/

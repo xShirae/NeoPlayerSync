@@ -1,0 +1,91 @@
+package dev.xshirae.neoplayersync
+
+import net.minecraft.server.level.ServerPlayer
+import net.neoforged.bus.api.EventPriority
+import net.neoforged.bus.api.SubscribeEvent
+import net.neoforged.fml.common.EventBusSubscriber
+import net.neoforged.neoforge.event.entity.player.PlayerContainerEvent
+import net.neoforged.neoforge.event.entity.player.PlayerEvent
+import net.neoforged.neoforge.event.server.ServerAboutToStartEvent
+import net.neoforged.neoforge.event.server.ServerStoppedEvent
+import net.neoforged.neoforge.event.tick.ServerTickEvent
+import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent
+
+/** Routes game events to the service. With the database off, there is no service and every handler does nothing. */
+@EventBusSubscriber(modid = NeoPlayerSync.MOD_ID)
+object PlayerDataSync {
+    internal var service: PlayerDataService? = null
+
+    @SubscribeEvent
+    fun onServerAboutToStart(event: ServerAboutToStartEvent) {
+        if (!DatabaseConfig.enabled()) return
+        val server = event.server
+        if (!server.isDedicatedServer) {
+            NeoPlayerSync.LOGGER.warn("${NeoPlayerSync.CONFIG_FILE} has enabled = true, but only a dedicated server uses Postgres. Using local files.")
+            return
+        }
+        // Stopping here is deliberate: falling back to local files would split a player's data across servers.
+        val settings = DatabaseConfig.settings()
+        val claimStore = PlayerDataStore(settings::connect)
+        claimStore.prepareTables()
+        service = PlayerDataService(
+            server = server,
+            claimStore = claimStore,
+            writeStore = PlayerDataStore(settings::connect),
+            serverName = settings.serverName.ifEmpty { server.port.toString() },
+        )
+        NeoPlayerSync.LOGGER.info("NeoPlayerSync is storing players in Postgres.")
+    }
+
+    internal fun registerLoadTask(event: RegisterConfigurationTasksEvent) {
+        service?.registerLoadTask(event)
+    }
+
+    /** First, so the restored tag is in place for every other mod's listener. */
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    fun onLoaded(event: PlayerEvent.LoadFromFile) {
+        (event.entity as? ServerPlayer)?.let { service?.onLoaded(it) }
+    }
+
+    /** Last, so the tag is gone before anything can save it into the player's file. */
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    fun afterLoaded(event: PlayerEvent.LoadFromFile) {
+        event.entity.persistentData.remove(NeoPlayerSync.RESTORED_TAG)
+    }
+
+    @SubscribeEvent
+    fun onLoggedIn(event: PlayerEvent.PlayerLoggedInEvent) {
+        (event.entity as? ServerPlayer)?.let { service?.onLoggedIn(it) }
+    }
+
+    @SubscribeEvent
+    fun onRespawn(event: PlayerEvent.PlayerRespawnEvent) {
+        (event.entity as? ServerPlayer)?.let { service?.onRespawn(it) }
+    }
+
+    @SubscribeEvent
+    fun onContainerClosed(event: PlayerContainerEvent.Close) {
+        (event.entity as? ServerPlayer)?.let { service?.onContainerClosed(it) }
+    }
+
+    @SubscribeEvent
+    fun onLoggedOut(event: PlayerEvent.PlayerLoggedOutEvent) {
+        (event.entity as? ServerPlayer)?.let { service?.onLoggedOut(it) }
+    }
+
+    @SubscribeEvent
+    fun onSaved(event: PlayerEvent.SaveToFile) {
+        service?.onSaved(event)
+    }
+
+    @SubscribeEvent
+    fun onServerTick(event: ServerTickEvent.Post) {
+        service?.onTick(event.server.tickCount.toLong())
+    }
+
+    @SubscribeEvent
+    fun onServerStopped(@Suppress("UNUSED_PARAMETER") event: ServerStoppedEvent) {
+        service?.stop()
+        service = null
+    }
+}

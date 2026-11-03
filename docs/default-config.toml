@@ -1,0 +1,18 @@
+#Store players in Postgres so they can move between servers. false uses local files and ignores the settings below.
+enabled = false
+#Address of the Postgres server.
+host = "127.0.0.1"
+#Port of the Postgres server.
+# Default: 5432
+# Range: 1 ~ 65535
+port = 5432
+#An existing database. NeoPlayerSync creates and upgrades its own tables in it.
+database = "minecraft"
+#A user who can create tables in that database.
+user = "minecraft"
+#That user's password. It is stored in plain text, so restrict this file and keep it out of shared modpacks.
+password = ""
+#Refuse a connection that is not encrypted. Turn this off only if the database is on this machine.
+require_ssl = true
+#Name shown in the database as the player's current server. Blank uses this server's port.
+server_name = ""

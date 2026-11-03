@@ -1,0 +1,96 @@
+plugins {
+    id 'java-library'
+    id 'org.jetbrains.kotlin.jvm' version '2.4.0'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+group = mod_group_id
+version = mod_version
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+kotlin.jvmToolchain(25)
+
+repositories {
+    maven {
+        name = 'Kotlin for Forge'
+        url = 'https://thedarkcolour.github.io/KotlinForForge/'
+    }
+}
+
+dependencies {
+    implementation "thedarkcolour:kotlinforforge-neoforge:${kff_version}"
+    implementation "org.postgresql:postgresql:${postgresql_version}"
+    jarJar "org.postgresql:postgresql:${postgresql_version}"
+
+    testImplementation "org.jetbrains.kotlin:kotlin-test-junit5:${kotlin_version}"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:${junit_version}"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher:${junit_platform_version}"
+}
+
+neoForge {
+    version = neo_version
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+            if (providers.gradleProperty('includeGameTests').isPresent()) sourceSet sourceSets.test
+        }
+    }
+
+    runs {
+        server {
+            server()
+            programArgument '--nogui'
+            gameDirectory = file('run/server')
+        }
+        if (providers.gradleProperty('includeGameTests').isPresent()) {
+            gameTestServer {
+                type = 'gameTestServer'
+                sourceSet = sourceSets.test
+                gameDirectory = file('build/game-test/server')
+                programArgument '--tests'
+                programArgument "${mod_id}:*"
+                programArgument '--report'
+                programArgument file('build/game-test/report.xml').absolutePath
+                programArgument '--universe'
+                programArgument file('build/game-test/universe').absolutePath
+            }
+        }
+    }
+
+    unitTest {
+        enable()
+        testedMod = mods."${mod_id}"
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    def replaceProperties = [
+            loader_version_range   : loader_version_range,
+            minecraft_version_range: minecraft_version_range,
+            neo_version_range      : neo_version_range,
+            mod_id                 : mod_id,
+            mod_version            : mod_version,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description,
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand replaceProperties
+    }
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+tasks.named('jar', Jar).configure {
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    from('LICENSE')
+}

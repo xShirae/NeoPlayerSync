@@ -1,0 +1,259 @@
+package dev.xshirae.neoplayersync
+
+import net.minecraft.nbt.CompoundTag
+import net.minecraft.network.chat.Component
+import net.minecraft.server.MinecraftServer
+import net.minecraft.server.level.ServerPlayer
+import net.minecraft.server.network.ServerConfigurationPacketListenerImpl
+import net.minecraft.world.inventory.AbstractContainerMenu
+import net.minecraft.world.inventory.ContainerListener
+import net.minecraft.world.item.ItemStack
+import net.neoforged.neoforge.event.entity.player.PlayerEvent
+import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent
+import java.nio.file.Files
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
+
+/** A player this server has claimed. Everything but the IDs belongs to the server thread. */
+internal class PlayerDataSession(
+    val playerId: UUID,
+    val sessionId: UUID,
+    val connected: () -> Boolean,
+    /** The stored character, until other mods have been told how old it is. */
+    var unshiftedSave: SavedPlayer?,
+) {
+    /** When the claim returned, so time spent finishing the join also counts against cooldowns. */
+    val claimedAtNanos: Long = System.nanoTime()
+    var inWorld = false
+    var closing = false
+    var inventoryChanged = false
+}
+
+/** Everything that exists only while a dedicated server is using Postgres. Each store belongs to one thread. */
+internal class PlayerDataService(
+    private val server: MinecraftServer,
+    private val claimStore: PlayerDataStore,
+    private val writeStore: PlayerDataStore,
+    private val serverName: String,
+) {
+    private val claimThread = singleThread("NeoPlayerSync claims")
+    private val writeThread = singleThread("NeoPlayerSync saves")
+    private val writer = PlayerDataWriter(writeStore, writeThread, ::onClaimLost)
+    private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
+    private val inventorySaves = LinkedHashSet<UUID>()
+    private val urgentSaves = LinkedHashSet<UUID>()
+
+    val inventorySavesWaiting: Int get() = inventorySaves.size
+
+    init {
+        claimThread.scheduleWithFixedDelay(::renewLeases, HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS)
+    }
+
+    fun registerLoadTask(event: RegisterConfigurationTasksEvent) {
+        val listener = event.listener as ServerConfigurationPacketListenerImpl
+        val client = ConfiguringClient(listener, server)
+        val playerId = listener.owner.id
+        event.register(
+            PlayerDataLoadTask(
+                playerId = playerId,
+                client = client,
+                store = claimStore,
+                executor = claimThread,
+                saveFolder = server.playerList.playerIo.playerDir.toPath(),
+                fixer = server.fixerUpper,
+                serverName = serverName,
+                onAdmitted = { sessionId, claim -> addSession(playerId, sessionId, claim) { client.connected } },
+            ),
+        )
+    }
+
+    /** Takes the whole claim, so the stored save that [onLoaded] reports cannot be left out on the way. */
+    fun addSession(playerId: UUID, sessionId: UUID, claim: PlayerClaim? = null, connected: () -> Boolean) {
+        sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved)
+    }
+
+    /**
+     * Vanilla has just read the player's file. Game time differs between servers, so this tells other mods how old the
+     * save is and which clock it came from, once per join, for timers such as cooldowns.
+     */
+    fun onLoaded(player: ServerPlayer) {
+        val session = sessions[player.uuid] ?: return
+        val saved = session.unshiftedSave ?: return
+        session.unshiftedSave = null
+        val sinceClaimMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - session.claimedAtNanos)
+        player.persistentData.put(NeoPlayerSync.RESTORED_TAG, CompoundTag().apply {
+            putLong(NeoPlayerSync.SAVED_GAME_TIME, saved.savedTick)
+            putLong(NeoPlayerSync.ELAPSED_MILLIS, saved.elapsedMillis + sinceClaimMillis)
+        })
+    }
+
+    fun onLoggedIn(player: ServerPlayer) {
+        val session = sessions[player.uuid] ?: return
+        session.inWorld = true
+        watchInventory(player, session)
+    }
+
+    /** Respawning builds a new player with a new inventory menu, and dying has just emptied the old one. */
+    fun onRespawn(player: ServerPlayer) {
+        val session = sessions[player.uuid] ?: return
+        watchInventory(player, session)
+        urgentSaves += player.uuid
+    }
+
+    /**
+     * The inventory listener hears nothing while another menu is open, and the ender chest has no listener at all.
+     * Clients can send a close packet at any time, so this must stay under the save cap rather than save at once.
+     */
+    fun onContainerClosed(player: ServerPlayer) {
+        sessions[player.uuid]?.inventoryChanged = true
+    }
+
+    fun onLoggedOut(player: ServerPlayer) {
+        sessions[player.uuid]?.closing = true
+    }
+
+    /** Vanilla just wrote this player's file. Every save, whatever triggered it, reaches the database through here. */
+    fun onSaved(event: PlayerEvent.SaveToFile) {
+        val session = sessions[event.entity.uuid] ?: return
+        val data = try {
+            // The event's getPlayerFile refuses "dat", which it reserves for vanilla's own file.
+            Files.readAllBytes(event.playerDirectory.toPath().resolve("${event.playerUUID}.dat"))
+        } catch (exception: Exception) {
+            NeoPlayerSync.LOGGER.error("Could not read the save of {}", session.playerId, exception)
+            return
+        }
+        session.inventoryChanged = false
+        writer.submit(PlayerWrite(session.playerId, session.sessionId, data, server.overworld().gameTime, session.closing))
+        if (session.closing) sessions.remove(session.playerId, session)
+    }
+
+    fun onTick(tick: Long) {
+        if (tick % CHECK_INTERVAL_TICKS == 0L) checkEverySecond()
+        for (session in sessions.values) {
+            if (session.inWorld && Math.floorMod(tick + session.playerId.hashCode(), TIMED_SAVE_TICKS) == 0L) {
+                urgentSaves += session.playerId
+            }
+        }
+        urgentSaves.forEach(::savePlayer)
+        urgentSaves.clear()
+
+        val iterator = inventorySaves.iterator()
+        var budget = MAX_INVENTORY_SAVES_PER_TICK
+        while (budget > 0 && iterator.hasNext()) {
+            savePlayer(iterator.next())
+            iterator.remove()
+            budget--
+        }
+        releaseFailedLogouts()
+    }
+
+    /** Waits for every save, which may block the stopping server thread for up to [STOP_WAIT_SECONDS]. */
+    fun stop() {
+        sessions.values.forEach { giveUpClaim(it) }
+        sessions.clear()
+        if (!writer.awaitIdle(TimeUnit.SECONDS.toMillis(STOP_WAIT_SECONDS))) {
+            NeoPlayerSync.LOGGER.error(
+                "Player data for sessions {} could not be saved before the server stopped. Each player's latest data is in this server's local save.",
+                writer.sessionsWithUnsentWrites(),
+            )
+        }
+        shutDown(claimThread, claimStore)
+        shutDown(writeThread, writeStore)
+    }
+
+    private fun checkEverySecond() {
+        for (session in sessions.values) {
+            when {
+                !session.inWorld && !session.connected() -> {
+                    // The client left during configuration, so no logout event or save will ever come.
+                    sessions.remove(session.playerId, session)
+                    giveUpClaim(session)
+                }
+                session.inventoryChanged -> {
+                    session.inventoryChanged = false
+                    inventorySaves += session.playerId
+                }
+            }
+        }
+    }
+
+    private fun watchInventory(player: ServerPlayer, session: PlayerDataSession) {
+        player.inventoryMenu.addSlotListener(object : ContainerListener {
+            override fun slotChanged(menu: AbstractContainerMenu, slot: Int, stack: ItemStack) {
+                session.inventoryChanged = true
+            }
+
+            override fun dataChanged(menu: AbstractContainerMenu, id: Int, value: Int) = Unit
+        })
+    }
+
+    private fun savePlayer(playerId: UUID) {
+        val player = server.playerList.getPlayer(playerId) ?: return
+        server.playerList.playerIo.save(player)
+    }
+
+    /** Vanilla's save swallows its own failures and then fires no event. Without this, the player could join nowhere. */
+    private fun releaseFailedLogouts() {
+        for (session in sessions.values) {
+            if (!session.closing) continue
+            NeoPlayerSync.LOGGER.error("The final save of {} failed. Their latest changes are only on this server.", session.playerId)
+            sessions.remove(session.playerId, session)
+            giveUpClaim(session)
+        }
+    }
+
+    private fun giveUpClaim(session: PlayerDataSession) {
+        writer.submit(PlayerWrite(session.playerId, session.sessionId, data = null, savedTick = 0L, release = true))
+    }
+
+    private fun renewLeases() {
+        try {
+            claimStore.heartbeat(sessions.values.mapTo(HashSet()) { it.sessionId } + writer.sessionsWithUnsentWrites())
+        } catch (exception: Exception) {
+            // Another server takes over only after the lease goes unrenewed for a while, and saves keep working until then.
+            NeoPlayerSync.LOGGER.warn("Could not renew player data leases", exception)
+        }
+    }
+
+    /** Runs on the save thread. Another server owns this player now, so this server must stop acting for them. */
+    private fun onClaimLost(playerId: UUID, sessionId: UUID) {
+        NeoPlayerSync.LOGGER.error("Player {} is now held by another server. Their local save was not uploaded.", playerId)
+        server.execute {
+            val session = sessions[playerId]
+            if (session?.sessionId != sessionId) return@execute
+            sessions.remove(playerId, session)
+            server.playerList.getPlayer(playerId)?.connection?.disconnect(CLAIM_LOST)
+        }
+    }
+
+    private fun shutDown(executor: ScheduledThreadPoolExecutor, store: PlayerDataStore) {
+        // The connection is not safe to share, so its own thread closes it after any work already queued.
+        executor.execute { store.close() }
+        executor.shutdown()
+        if (!executor.awaitTermination(STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+            NeoPlayerSync.LOGGER.warn("A NeoPlayerSync thread did not finish within {} seconds of the server stopping.", STOP_WAIT_SECONDS)
+        }
+    }
+
+    private fun singleThread(name: String) = ScheduledThreadPoolExecutor(1, ThreadFactory { task ->
+        Thread(task, name).apply { isDaemon = true }
+    }).apply {
+        // A waiting claim or retry must not run after shutdown, or it would reopen the connection.
+        executeExistingDelayedTasksAfterShutdownPolicy = false
+    }
+
+    private companion object {
+        const val HEARTBEAT_SECONDS = 5L
+        const val STOP_WAIT_SECONDS = 20L
+        const val CHECK_INTERVAL_TICKS = 20L
+        const val TIMED_SAVE_TICKS = 1_200L
+
+        /** Each save runs on the server thread, so a burst of changes waits rather than causing lag. */
+        const val MAX_INVENTORY_SAVES_PER_TICK = 2
+
+        val CLAIM_LOST: Component = Component.literal("Your character moved to another server.")
+    }
+}
