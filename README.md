@@ -41,6 +41,8 @@ Saves happen within about a second of an inventory change, every 60 seconds, on 
 
 Your mod's player attachments and persistent data travel with no extra work.
 
+NeoPlayerSync uploads every save of the player file, whatever caused it. For a change that must not wait for the next timed save, such as an unlock, save the player with vanilla's `server.getPlayerList().getPlayerIo().save(player)`. The upload is queued at once and sent on a separate thread, so it is in the database within moments rather than up to a minute later.
+
 Deadlines stored as an absolute game tick, such as cooldowns, need one adjustment, because each server's game time is different. While `PlayerEvent.LoadFromFile` is dispatched for a player whose stored character was just loaded, NeoPlayerSync puts a compound under `neoplayersync:restored` in the player's persistent data:
 
 | Field | Meaning |
