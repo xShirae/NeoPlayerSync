@@ -1,62 +1,138 @@
 # NeoPlayerSync
 
-NeoPlayerSync keeps a player's character in a PostgreSQL database, so they can move between NeoForge servers behind a proxy such as Velocity and arrive with everything they had. It is for networks of modded servers, where every mod's player data needs to travel too.
+You run several NeoForge servers behind a proxy like Velocity. A player walks from one server to another. Without this mod, they arrive with an empty backpack, because each server keeps its own copy of the player.
 
-It moves the player's whole save file, so these travel together:
+NeoPlayerSync stores the player in one PostgreSQL database that all your servers share. When the player switches servers, the new server reads their character from that database, so they keep everything.
+
+## What travels with the player
 
 - inventory, armor, off hand and ender chest
-- health, absorption, hunger and effects
-- vanilla experience and the recipe book
-- every mod's player attachments and persistent data
+- health, hunger and potion effects
+- experience and the recipe book
+- the player data of every other mod you run
 
 Position, spawn point, advancements and statistics stay on each server.
 
-## Requirements
+## What you need
 
-- Minecraft 26.3 with NeoForge 26.3.0.99 or a later 26.3 build
+- Minecraft 26.3 with NeoForge 26.3.0.99 or newer
 - [Kotlin for Forge](https://www.curseforge.com/minecraft/mc-mods/kotlin-for-forge) 6.4.0
-- PostgreSQL. It was tested with 17.6.
-- A proxy that forwards players between backends, such as Velocity with modern forwarding
+- a PostgreSQL server (we test with 17.6)
+- a proxy such as Velocity, with player forwarding set up
 
-Install it on every backend server. Clients do not need it, and the proxy does not need it. It does nothing in singleplayer or on a LAN world.
+Players don't install anything. The proxy doesn't need the mod either.
 
 ## Setup
 
-1. Create an empty database and a user who can create tables in it. NeoPlayerSync creates and upgrades its own tables.
-2. Put the jar in each backend's `mods/` folder and start the server once to create `config/neoplayersync.toml`.
-3. Set `enabled = true` and fill in the database settings. [docs/default-config.toml](docs/default-config.toml) lists every setting.
-4. Restart. The log shows `NeoPlayerSync is storing players in Postgres.`
+**1. Make a database.** In PostgreSQL, create an empty database and a user who owns it:
 
-With `enabled = true`, a server that cannot reach the database stops at startup instead of falling back to local files, because that would split a player's data between servers. The file holds the database password, so keep it out of shared modpacks. It is a `LOCAL` config and is never sent to clients.
+```sql
+CREATE USER minecraft WITH PASSWORD 'pick-a-strong-password';
+CREATE DATABASE minecraft OWNER minecraft;
+```
 
-A player's existing data on a server is uploaded the first time that server saves them, so a network can turn the mod on without a reset.
+NeoPlayerSync creates its own tables the first time it starts.
+
+**2. Install the mod.** Copy the jar into the `mods` folder of each server behind your proxy. Start each server once, then stop it. That creates `config/neoplayersync.toml`.
+
+**3. Fill in the config.** Open `config/neoplayersync.toml` on each server:
+
+```toml
+enabled = true
+host = "10.0.0.5"        # your database's address
+port = 5432
+database = "minecraft"
+user = "minecraft"
+password = "pick-a-strong-password"
+require_ssl = true       # set false only if the database runs on the same machine
+server_name = "lobby"    # any name; the database shows it as the player's current server
+```
+
+[docs/default-config.toml](docs/default-config.toml) explains every setting.
+
+**4. Start your servers.** Look for this line in each log:
+
+```
+NeoPlayerSync is storing players in Postgres.
+```
+
+If a server can't reach the database, it refuses to start rather than letting players load an old copy of their character.
+
+The config file holds your database password. Keep it out of modpacks you share. NeoForge never sends it to players.
+
+You can turn the mod on for a network that already has players. Each player's current character goes into the database the first time a server saves them.
 
 ## How it works
 
-Before a player's data loads, NeoPlayerSync claims the player's row and writes the stored character into the local save file. Vanilla then loads it as usual. After each save, it uploads the new file. Only one server can hold a player at a time: a lease, renewed every 5 seconds, stops two servers from writing the same character, and a joining server waits until the previous one has finished saving.
+Think of the database row as the one real copy of the player, and each server as borrowing it.
 
-Saves happen within about a second of an inventory change, every 60 seconds, on respawn, on logout and at server stop. A crashed server loses about a second of inventory changes and up to 60 seconds of everything else. [docs/design.md](docs/design.md) explains the design, the limits and the failure cases.
+1. A player joins a server. That server borrows the player's row and copies the character into its normal save file. Minecraft loads the player from that file as usual.
+2. While the player plays, the server writes their character back to the database. It does this about a second after the inventory changes, once a minute, and when they respawn or leave.
+3. The player switches servers. The old server writes their character one last time and hands the row back. The new server waits for that, then borrows the row.
+
+Only one server can borrow a player at a time, so two servers can never overwrite each other. If a server crashes, the next server waits about 15 seconds to make sure the crashed one is gone, then takes the player. They lose up to a second of inventory changes and up to a minute of everything else. [docs/design.md](docs/design.md) covers the full design and every failure case.
 
 ## For mod developers
 
-Your mod's player attachments and persistent data travel with no extra work.
+Most mods work with no changes. Your mod's player attachments and persistent data live in the player's save file, and NeoPlayerSync moves that whole file.
 
-NeoPlayerSync uploads every save of the player file, whatever caused it. For a change that must not wait for the next timed save, such as an unlock, save the player with vanilla's `server.getPlayerList().getPlayerIo().save(player)`. The upload is queued at once and sent on a separate thread, so it is in the database within moments rather than up to a minute later.
+Two cases need a few lines from you.
 
-Deadlines stored as an absolute game tick, such as cooldowns, need one adjustment, because each server's game time is different. While `PlayerEvent.LoadFromFile` is dispatched for a player whose stored character was just loaded, NeoPlayerSync puts a compound under `neoplayersync:restored` in the player's persistent data:
+### Save important changes right away
+
+NeoPlayerSync uploads the player every time the server saves them, and the regular save comes once a minute. When a player earns something they must not lose to a crash, like an unlock or a rare reward, save them at once:
+
+```java
+player.level().getServer().getPlayerList().getPlayerIo().save(player);
+```
+
+NeoPlayerSync sends that save to the database within milliseconds. This is plain Minecraft code, so your mod needs no dependency on NeoPlayerSync, and it also protects players on a single server.
+
+### Fix timers stored as game ticks
+
+Say you store a cooldown as "ends at game tick 5,000,600". Each server counts game ticks from its own start, so that number means nothing on the next server. The player might wait hours, or skip the cooldown.
+
+When NeoPlayerSync loads a player from the database, it tells you how old the save is. During `PlayerEvent.LoadFromFile`, the player's persistent data holds a compound named `neoplayersync:restored`:
 
 | Field | Meaning |
 | --- | --- |
-| `saved_game_time` | The old server's overworld game time when the character was saved |
-| `elapsed_millis` | Real time since that save, including the join |
+| `saved_game_time` | the old server's game tick when it saved the player |
+| `elapsed_millis` | real time since that save, in milliseconds |
 
-Read it in a `LoadFromFile` listener at any priority between `HIGHEST` and `LOWEST`, and move each deadline by `nowTick - saved_game_time - elapsed_millis / 50`. The tag is present at most once per join and is removed before anything can save it. Your mod needs no dependency on NeoPlayerSync.
+Move your deadlines onto this server's clock:
 
-## Building and testing
+```java
+@SubscribeEvent
+public static void onLoad(PlayerEvent.LoadFromFile event) {
+    event.getEntity().getPersistentData().getCompound("neoplayersync:restored").ifPresent(restored -> {
+        long savedGameTime = restored.getLongOr("saved_game_time", 0L);
+        long elapsedMillis = restored.getLongOr("elapsed_millis", 0L);
+        long now = event.getEntity().level().getServer().overworld().getGameTime();
+        long shift = now - savedGameTime - elapsedMillis / 50;
+        // Add shift to every deadline you stored as a game tick.
+    });
+}
+```
 
-Use Java 25. On Windows, `.\tools\run-gradle.ps1 build` uses `JAVA_HOME` or a JDK under `tools/java25`.
+A few rules:
 
-The database tests need a local PostgreSQL. Extract the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then start the disposable test database on `127.0.0.1:5433`:
+- Use the normal event priority. NeoPlayerSync adds the tag at `HIGHEST` and removes it at `LOWEST`.
+- The tag shows up at most once per join. A player loading for the first time gets no tag, and their timers stay as they are.
+- Read the tag, don't remove it. Other mods may need it too.
+
+You need no dependency on NeoPlayerSync. Without it, the tag never appears and your listener does nothing.
+
+## Building
+
+You need Java 25. On Windows:
+
+```powershell
+.\tools\run-gradle.ps1 build
+```
+
+The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`.
+
+Some tests need a real database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
 
 ```powershell
 .\tools\test-postgres.ps1 start
@@ -65,8 +141,8 @@ The database tests need a local PostgreSQL. Extract the PostgreSQL Windows binar
 .\tools\test-postgres.ps1 stop
 ```
 
-Without the database, those tests are skipped: the unit tests report them as skipped, and each GameTest logs `SKIPPED a player data GameTest` and passes.
+The script runs a throwaway database on `127.0.0.1:5433`. Without it, the database tests skip themselves.
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE)
