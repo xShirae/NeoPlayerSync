@@ -1,11 +1,23 @@
+# Build output and caches
 .gradle/
 .kotlin/
 build/
-run/
 out/
+run/
+logs/
+*.log
+
+# Editors and operating systems
 .idea/
 *.iml
+.vscode/
+.DS_Store
+Thumbs.db
 
 # Portable tools for local testing, see the README.
 /tools/postgres/
 /tools/java25/
+
+# Working notes kept out of the published repository
+/docs/design.md
+/docs/verification.md

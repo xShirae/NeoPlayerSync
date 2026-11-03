@@ -70,7 +70,7 @@ Think of the database row as the one real copy of the player, and each server as
 2. While the player plays, the server writes their character back to the database. It does this about a second after the inventory changes, once a minute, and when they respawn or leave.
 3. The player switches servers. The old server writes their character one last time and hands the row back. The new server waits for that, then borrows the row.
 
-Only one server can borrow a player at a time, so two servers can never overwrite each other. If a server crashes, the next server waits about 15 seconds to make sure the crashed one is gone, then takes the player. They lose up to a second of inventory changes and up to a minute of everything else. [docs/design.md](docs/design.md) covers the full design and every failure case.
+Only one server can borrow a player at a time, so two servers can never overwrite each other. If a server crashes, the next server waits about 15 seconds to make sure the crashed one is gone, then takes the player. They lose up to a second of inventory changes and up to a minute of everything else.
 
 ## For mod developers
 
