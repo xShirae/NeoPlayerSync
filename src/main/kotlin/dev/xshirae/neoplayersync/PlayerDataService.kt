@@ -38,13 +38,17 @@ internal class PlayerDataService(
     private val claimStore: PlayerDataStore,
     private val writeStore: PlayerDataStore,
     private val serverName: String,
+    /** Server-thread time each tick may spend on queued inventory saves. One save always runs, so the queue keeps moving. */
+    private val inventorySaveBudgetNanos: Long = INVENTORY_SAVE_BUDGET_NANOS,
 ) {
     private val claimThread = singleThread("NeoPlayerSync claims")
     private val writeThread = singleThread("NeoPlayerSync saves")
     private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::onClaimLost)
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
-    private val inventorySaves = LinkedHashSet<UUID>()
+    /** Players waiting for an inventory save, oldest first, with when each started waiting. */
+    private val inventorySaves = LinkedHashMap<UUID, Long>()
     private val urgentSaves = LinkedHashSet<UUID>()
+    private var lastBacklogWarningNanos: Long? = null
 
     val inventorySavesWaiting: Int get() = inventorySaves.size
 
@@ -138,16 +142,17 @@ internal class PlayerDataService(
             }
         }
         // An urgent save also covers the inventory, so a second save this tick would repeat the same work.
-        inventorySaves -= urgentSaves
+        inventorySaves.keys -= urgentSaves
         urgentSaves.forEach(::savePlayer)
         urgentSaves.clear()
 
-        val iterator = inventorySaves.iterator()
-        var budget = MAX_INVENTORY_SAVES_PER_TICK
-        while (budget > 0 && iterator.hasNext()) {
+        // A time budget rather than a count, so a light modpack saves many players per tick and a heavy one fewer.
+        val deadline = System.nanoTime() + inventorySaveBudgetNanos
+        val iterator = inventorySaves.keys.iterator()
+        while (iterator.hasNext()) {
             savePlayer(iterator.next())
             iterator.remove()
-            budget--
+            if (System.nanoTime() - deadline >= 0L) break
         }
         releaseFailedLogouts()
     }
@@ -180,10 +185,25 @@ internal class PlayerDataService(
                 }
                 session.inventoryChanged -> {
                     session.inventoryChanged = false
-                    inventorySaves += session.playerId
+                    inventorySaves.putIfAbsent(session.playerId, System.nanoTime())
                 }
             }
         }
+        warnIfInventorySavesLag(System.nanoTime())
+    }
+
+    /** A crash loses whatever is still queued, so a growing wait must reach the logs before it reaches players. */
+    private fun warnIfInventorySavesLag(now: Long) {
+        val oldest = inventorySaves.values.firstOrNull() ?: return
+        if (now - oldest < BACKLOG_WARNING_NANOS) return
+        val lastWarning = lastBacklogWarningNanos
+        if (lastWarning != null && now - lastWarning < BACKLOG_WARNING_INTERVAL_NANOS) return
+        lastBacklogWarningNanos = now
+        NeoPlayerSync.LOGGER.warn(
+            "{} players are waiting for an inventory save, the oldest for {} seconds. A crash now would lose their latest inventory changes.",
+            inventorySaves.size,
+            TimeUnit.NANOSECONDS.toSeconds(now - oldest),
+        )
     }
 
     private fun watchInventory(player: ServerPlayer, session: PlayerDataSession) {
@@ -257,8 +277,10 @@ internal class PlayerDataService(
         const val CHECK_INTERVAL_TICKS = 20L
         const val TIMED_SAVE_TICKS = 1_200L
 
-        /** Each save runs on the server thread, so a burst of changes waits rather than causing lag. */
-        const val MAX_INVENTORY_SAVES_PER_TICK = 2
+        /** Each save runs on the server thread, so a burst of changes waits rather than causing lag. 3 ms is 6% of a tick. */
+        val INVENTORY_SAVE_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(3L)
+        val BACKLOG_WARNING_NANOS = TimeUnit.SECONDS.toNanos(5L)
+        val BACKLOG_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1L)
 
         val CLAIM_LOST: Component = Component.literal("Your character moved to another server.")
     }

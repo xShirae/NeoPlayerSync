@@ -89,7 +89,7 @@ On Windows, write the path with forward slashes, like `"C:/certs/ca.crt"`. A bac
 Think of the database row as the one real copy of the player, and each server as borrowing it.
 
 1. A player joins a server. That server borrows the player's row and copies the character into its normal save file. Minecraft loads the player from that file as usual.
-2. While the player plays, the server writes their character back to the database. It does this about a second after the inventory changes, once a minute, and when they respawn or leave. It skips a save that matches the last one it sent, so an idle player's timed save sends no data.
+2. While the player plays, the server writes their character back to the database. It does this about a second after the inventory changes, once a minute, and when they respawn or leave. It skips a save that matches the last one it sent, so an idle player's timed save sends no data. On a server too busy to keep up, the wait grows, and the server logs a warning once a player has waited more than 5 seconds.
 3. The player switches servers. The old server writes their character one last time and hands the row back. The new server waits for that, then borrows the row.
 
 Only one server can borrow a player at a time, so two servers can never overwrite each other. If a server crashes, the next server waits about 15 seconds to make sure the crashed one is gone, then takes the player. They lose up to a second of inventory changes and up to a minute of everything else.

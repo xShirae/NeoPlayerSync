@@ -112,5 +112,5 @@ object SyncGameTestRegistration {
         }
     }
 
-    private const val EXPECTED_TEST_COUNT = 18
+    private const val EXPECTED_TEST_COUNT = 19
 }

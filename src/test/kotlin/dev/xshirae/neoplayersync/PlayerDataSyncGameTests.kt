@@ -16,6 +16,7 @@ import org.opentest4j.TestAbortedException
 import java.nio.file.Files
 import java.sql.SQLException
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -92,6 +93,8 @@ object PlayerDataSyncGameTests {
     private fun withDatabase(
         helper: GameTestHelper,
         writeStore: (PlayerDataTestDatabase) -> PlayerDataStore = { it.newStore() },
+        // No time to spare, so exactly one queued inventory save runs per tick and counts don't depend on machine speed.
+        inventorySaveBudgetNanos: Long = 0L,
         test: Fixture.() -> Unit,
     ) {
         val database = try {
@@ -102,7 +105,7 @@ object PlayerDataSyncGameTests {
             return
         }
         database.newStore().prepareTables()
-        val service = PlayerDataService(helper.level.server, database.newStore(), writeStore(database), "test")
+        val service = PlayerDataService(helper.level.server, database.newStore(), writeStore(database), "test", inventorySaveBudgetNanos)
         PlayerDataSync.service = service
         Fixture(helper, database, service).test()
     }
@@ -209,18 +212,18 @@ object PlayerDataSyncGameTests {
 
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-cap")
-    fun inventorySavesWaitTheirTurnUnderTheCap(helper: GameTestHelper) = withDatabase(helper) {
+    fun inventorySavesWaitTheirTurnOnceTheBudgetIsSpent(helper: GameTestHelper) = withDatabase(helper) {
         val players = (1..5).map { claimedPlayer("sync-cap$it").first }
         players.forEach {
             it.inventory.add(ItemStack(Items.DIAMOND))
             it.inventoryMenu.broadcastChanges()
         }
-        val tick = quietCheckTick(players)
+        val tick = quietCheckTick(players, span = 5)
         service.onTick(tick)
-        helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
+        helper.assertTrue(service.inventorySavesWaiting == 4, "1 of 5 should save with no time to spare, ${service.inventorySavesWaiting} are waiting")
         service.onTick(tick + 1)
-        helper.assertTrue(service.inventorySavesWaiting == 1, "2 more should save next tick, ${service.inventorySavesWaiting} are waiting")
-        service.onTick(tick + 2)
+        helper.assertTrue(service.inventorySavesWaiting == 3, "1 more should save next tick, ${service.inventorySavesWaiting} are waiting")
+        (2L..4L).forEach { service.onTick(tick + it) }
         helper.assertTrue(service.inventorySavesWaiting == 0, "All should be saved by now")
         finishWhen("All 5 should be stored") {
             players.all { savedCount(it) == 1 }.also { done ->
@@ -229,7 +232,24 @@ object PlayerDataSyncGameTests {
         }
     }
 
-    /** Without the skip, this tick's 2 inventory saves would repeat players the urgent saves just covered, and 1 would still wait. */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-budget")
+    fun aRoomyBudgetSavesTheWholeQueueInOneTick(helper: GameTestHelper) = withDatabase(helper, inventorySaveBudgetNanos = TimeUnit.SECONDS.toNanos(10L)) {
+        val players = (1..5).map { claimedPlayer("sync-budget$it").first }
+        players.forEach {
+            it.inventory.add(ItemStack(Items.DIAMOND))
+            it.inventoryMenu.broadcastChanges()
+        }
+        service.onTick(quietCheckTick(players, span = 1))
+        helper.assertTrue(service.inventorySavesWaiting == 0, "All 5 should save in one tick, ${service.inventorySavesWaiting} are waiting")
+        finishWhen("All 5 should be stored") {
+            players.all { savedCount(it) == 1 }.also { done ->
+                if (done) players.forEach(helper.level.server.playerList::remove)
+            }
+        }
+    }
+
+    /** Without the skip, this tick's inventory save would repeat a player the urgent saves just covered, and 3 would still wait. */
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-urgent")
     fun anUrgentSaveTakesThePlayerOutOfTheInventoryQueue(helper: GameTestHelper) = withDatabase(helper) {
@@ -240,7 +260,7 @@ object PlayerDataSyncGameTests {
         }
         val tick = quietCheckTick(players)
         service.onTick(tick)
-        helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
+        helper.assertTrue(service.inventorySavesWaiting == 4, "1 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
 
         val respawned = players.map { helper.level.server.playerList.respawn(it, false, Entity.RemovalReason.KILLED) }
         service.onTick(tick + 1)
@@ -252,17 +272,17 @@ object PlayerDataSyncGameTests {
         }
     }
 
-    /** Vanilla puts no limit on client close packets, so they must never force more saves than the cap allows. */
+    /** Vanilla puts no limit on client close packets, so they must never force more saves than the budget allows. */
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-close")
-    fun closingContainersStaysUnderTheCap(helper: GameTestHelper) = withDatabase(helper) {
+    fun closingContainersStaysWithinTheBudget(helper: GameTestHelper) = withDatabase(helper) {
         val players = (1..5).map { claimedPlayer("sync-close$it").first }
         players.forEach { it.doCloseContainer() }
         helper.assertTrue(players.none(::localSaveExists), "Closing a container must not save right away")
 
         val tick = quietCheckTick(players)
         service.onTick(tick)
-        helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
+        helper.assertTrue(service.inventorySavesWaiting == 4, "1 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
         finishWhen("Every closed container should be stored") {
             service.onTick(tick + 1)
             players.all { savedCount(it) == 1 }.also { done ->
