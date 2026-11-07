@@ -1,6 +1,9 @@
 package dev.xshirae.neoplayersync
 
+import com.electronwill.nightconfig.core.io.ParsingException
+import com.electronwill.nightconfig.toml.TomlParser
 import net.neoforged.neoforge.common.ModConfigSpec
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
@@ -41,6 +44,22 @@ internal object DatabaseConfig {
         .define("server_name", "")
 
     val SPEC: ModConfigSpec = builder.build()
+
+    /** Why the operator's file failed to parse, or null. NeoForge replaces such a file with defaults, which turns sync off. */
+    var unreadableFileError: String? = null
+
+    /** Reads [file] the way NeoForge does. Call it before NeoForge loads the file, which then still holds the operator's text. */
+    fun tomlError(file: Path): String? {
+        if (!Files.exists(file)) return null
+        return try {
+            Files.newBufferedReader(file).use { TomlParser().parse(it) }
+            null
+        } catch (e: IOException) {
+            e.toString()
+        } catch (e: ParsingException) {
+            e.message ?: e.toString()
+        }
+    }
 
     fun enabled(): Boolean = enabled.get()
 

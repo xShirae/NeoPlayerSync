@@ -5,11 +5,14 @@ import net.neoforged.bus.api.IEventBus
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
 import net.neoforged.fml.config.ModConfig
+import net.neoforged.fml.loading.FMLPaths
 import org.slf4j.Logger
 
 @Mod(NeoPlayerSync.MOD_ID)
 class NeoPlayerSync(modBus: IEventBus, modContainer: ModContainer) {
     init {
+        // NeoForge opens this config type after mod construction, so the file is still the operator's own.
+        DatabaseConfig.unreadableFileError = DatabaseConfig.tomlError(FMLPaths.CONFIGDIR.get().resolve(CONFIG_FILE))
         modContainer.registerConfig(localConfigType(), DatabaseConfig.SPEC, CONFIG_FILE)
         modBus.addListener(PlayerDataSync::registerLoadTask)
     }

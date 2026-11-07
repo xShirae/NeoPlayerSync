@@ -62,7 +62,7 @@ server_name = "lobby"    # any name; the database shows it as the player's curre
 NeoPlayerSync is storing players in Postgres.
 ```
 
-If a server can't reach the database, it refuses to start rather than letting players load an old copy of their character.
+If a server can't reach the database, it refuses to start rather than letting players load an old copy of their character. It also refuses to start if `config/neoplayersync.toml` is not valid TOML. NeoForge replaces a broken file with defaults, which turn sync off; it keeps your version as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
 
 The config file holds your database password. Keep it out of modpacks you share. NeoForge never sends it to players.
 
@@ -80,7 +80,7 @@ ssl_root_cert = "config/postgres-ca.crt"
 
 The database's certificate must name the address you put in `host`. A relative path starts from the server's folder.
 
-On Windows, write the path with forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file, and NeoForge then replaces it with a fresh one where `enabled = false`, so your server would start without the database. With this set, the server refuses to connect to anything that can't prove it is your database.
+On Windows, write the path with forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file, and the server then refuses to start. With this set, the server refuses to connect to anything that can't prove it is your database.
 
 ## How it works
 
