@@ -65,6 +65,15 @@ object PlayerDataSyncGameTests {
             return PlayerDataMerge.readSave(stored).getListOrEmpty("Inventory").size
         }
 
+        /**
+         * The first one-second check where no timed save of [players] lands in the next [span] ticks. Test players get
+         * random IDs, so a fixed tick would sometimes add an urgent save and change how many inventory saves wait.
+         */
+        fun quietCheckTick(players: List<ServerPlayer>, span: Int = 3): Long =
+            generateSequence(20L) { it + 20L }.first { start ->
+                (start until start + span).none { tick -> players.any { service.isTimedSaveTick(it.uuid, tick) } }
+            }
+
         /** Passes the test once [condition] holds. Runs the check each tick, because saves land on another thread. */
         fun finishWhen(message: String, condition: () -> Boolean) {
             helper.succeedWhen {
@@ -206,15 +215,39 @@ object PlayerDataSyncGameTests {
             it.inventory.add(ItemStack(Items.DIAMOND))
             it.inventoryMenu.broadcastChanges()
         }
-        service.onTick(20L)
+        val tick = quietCheckTick(players)
+        service.onTick(tick)
         helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
-        service.onTick(21L)
+        service.onTick(tick + 1)
         helper.assertTrue(service.inventorySavesWaiting == 1, "2 more should save next tick, ${service.inventorySavesWaiting} are waiting")
-        service.onTick(22L)
+        service.onTick(tick + 2)
         helper.assertTrue(service.inventorySavesWaiting == 0, "All should be saved by now")
         finishWhen("All 5 should be stored") {
             players.all { savedCount(it) == 1 }.also { done ->
                 if (done) players.forEach(helper.level.server.playerList::remove)
+            }
+        }
+    }
+
+    /** Without the skip, this tick's 2 inventory saves would repeat players the urgent saves just covered, and 1 would still wait. */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-urgent")
+    fun anUrgentSaveTakesThePlayerOutOfTheInventoryQueue(helper: GameTestHelper) = withDatabase(helper) {
+        val players = (1..5).map { claimedPlayer("sync-urg$it").first }
+        players.forEach {
+            it.inventory.add(ItemStack(Items.DIAMOND))
+            it.inventoryMenu.broadcastChanges()
+        }
+        val tick = quietCheckTick(players)
+        service.onTick(tick)
+        helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
+
+        val respawned = players.map { helper.level.server.playerList.respawn(it, false, Entity.RemovalReason.KILLED) }
+        service.onTick(tick + 1)
+        helper.assertTrue(service.inventorySavesWaiting == 0, "Urgent saves should empty the queue, ${service.inventorySavesWaiting} are waiting")
+        finishWhen("All 5 should be stored") {
+            players.all { savedCount(it) == 1 }.also { done ->
+                if (done) respawned.forEach(helper.level.server.playerList::remove)
             }
         }
     }
@@ -227,10 +260,11 @@ object PlayerDataSyncGameTests {
         players.forEach { it.doCloseContainer() }
         helper.assertTrue(players.none(::localSaveExists), "Closing a container must not save right away")
 
-        service.onTick(20L)
+        val tick = quietCheckTick(players)
+        service.onTick(tick)
         helper.assertTrue(service.inventorySavesWaiting == 3, "2 of 5 should save this tick, ${service.inventorySavesWaiting} are waiting")
         finishWhen("Every closed container should be stored") {
-            service.onTick(21L)
+            service.onTick(tick + 1)
             players.all { savedCount(it) == 1 }.also { done ->
                 if (done) players.forEach(helper.level.server.playerList::remove)
             }

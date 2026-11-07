@@ -133,10 +133,12 @@ internal class PlayerDataService(
     fun onTick(tick: Long) {
         if (tick % CHECK_INTERVAL_TICKS == 0L) checkEverySecond()
         for (session in sessions.values) {
-            if (session.inWorld && Math.floorMod(tick + session.playerId.hashCode(), TIMED_SAVE_TICKS) == 0L) {
+            if (session.inWorld && isTimedSaveTick(session.playerId, tick)) {
                 urgentSaves += session.playerId
             }
         }
+        // An urgent save also covers the inventory, so a second save this tick would repeat the same work.
+        inventorySaves -= urgentSaves
         urgentSaves.forEach(::savePlayer)
         urgentSaves.clear()
 
@@ -149,6 +151,10 @@ internal class PlayerDataService(
         }
         releaseFailedLogouts()
     }
+
+    /** Spreads each player's minute-long timer over its own tick, so the timed saves don't all land at once. */
+    internal fun isTimedSaveTick(playerId: UUID, tick: Long): Boolean =
+        Math.floorMod(tick + playerId.hashCode(), TIMED_SAVE_TICKS) == 0L
 
     /** Waits for every save, which may block the stopping server thread for up to [STOP_WAIT_SECONDS]. */
     fun stop() {
