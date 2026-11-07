@@ -77,9 +77,7 @@ A server with `enabled = false` keeps its own separate copy of each player and n
 
 ## When a server won't start
 
-A server that can't reach the database refuses to start. This stops players from loading an old copy of their character.
-
-A server also refuses to start if `config/neoplayersync.toml` is broken. NeoForge replaces a broken file with defaults, which turn sync off, and saves yours as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
+A server refuses to start if it can't reach the database, so players never load an old copy of their character. It also refuses if `config/neoplayersync.toml` is broken. NeoForge replaces a broken file with defaults, which turn sync off, and saves yours as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
 
 ## Commands
 
@@ -100,15 +98,9 @@ Only one server can borrow a player at a time, so two servers never overwrite ea
 
 If a server crashes, the next server waits about 15 seconds to be sure the crashed one is gone, then takes the player. The player loses up to a second of inventory changes and up to a minute of everything else.
 
-With `sync_statistics` on, play time and distance walked only go out with the next real change or when the player leaves. A crash can lose that much of them.
-
-If a server falls behind on saves, it logs a warning once a player has waited more than 5 seconds.
-
 ## Check the database's certificate
 
-`require_ssl = true` encrypts the connection, but it doesn't prove your server reached your real database. On a private network that's fine. Over the internet or a shared cloud network, someone in between could pretend to be your database, read the password and change characters.
-
-To prevent that, give each server the certificate of the authority that signed your database's certificate, as a PEM file:
+On a private network, `require_ssl = true` is enough. Over the internet or a shared cloud network, someone in between could pretend to be your database and steal the password. To prevent that, give each server the PEM certificate of the authority that signed your database's certificate:
 
 ```toml
 ssl_root_cert = "config/postgres-ca.crt"
@@ -130,7 +122,7 @@ The regular save comes once a minute. When a player earns something they must no
 player.level().getServer().getPlayerList().getPlayerIo().save(player);
 ```
 
-NeoPlayerSync uploads that save within milliseconds. This is plain Minecraft code, so you need no dependency on NeoPlayerSync, and it protects single-server players too.
+This is plain Minecraft code, so you need no dependency on NeoPlayerSync.
 
 ### Fix timers stored as game ticks
 
@@ -172,7 +164,7 @@ You need Java 25. On Windows:
 .\tools\run-gradle.ps1 build
 ```
 
-The script uses `JAVA_HOME`, or a JDK unpacked into `tools/java25`. The jar lands in `build/libs` and runs on 26.1.2, 26.2 and 26.3.
+The script uses `JAVA_HOME`, or a JDK unpacked into `tools/java25`. The jar lands in `build/libs`.
 
 Some tests need a database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
 
