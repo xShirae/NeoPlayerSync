@@ -41,7 +41,7 @@ internal class PlayerDataService(
 ) {
     private val claimThread = singleThread("NeoPlayerSync claims")
     private val writeThread = singleThread("NeoPlayerSync saves")
-    private val writer = PlayerDataWriter(writeStore, writeThread, ::onClaimLost)
+    private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::onClaimLost)
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
     private val inventorySaves = LinkedHashSet<UUID>()
     private val urgentSaves = LinkedHashSet<UUID>()

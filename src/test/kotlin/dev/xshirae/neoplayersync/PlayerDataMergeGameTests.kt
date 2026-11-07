@@ -11,6 +11,7 @@ import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.storage.TagValueInput
+import java.nio.file.Files
 
 /** Uses real player saves, so a renamed vanilla key or a broken attachment fails here rather than in play. */
 object PlayerDataMergeGameTests {
@@ -67,6 +68,35 @@ object PlayerDataMergeGameTests {
         helper.level.server.playerList.remove(origin)
         helper.level.server.playerList.remove(here)
         helper.succeed()
+    }
+
+    /** The timed save of an idle player is only worth skipping if its travelling part really stays the same. */
+    @JvmStatic
+    @SyncGameTest(template = "empty", batch = "player-data")
+    fun anIdlePlayersSavesKeepTheSameDigest(helper: GameTestHelper) {
+        val player = TestPlayers.survival(helper, "merge-idle")
+        val playerIo = helper.level.server.playerList.playerIo
+        val file = playerIo.playerDir.toPath().resolve("${player.uuid}.dat")
+        // A new player's first ticks write default attributes and unlock a starter recipe, which a real join has done long ago.
+        helper.runAfterDelay(20) {
+            playerIo.save(player)
+            val firstBytes = Files.readAllBytes(file)
+
+            helper.runAfterDelay(20) {
+                playerIo.save(player)
+                val secondBytes = Files.readAllBytes(file)
+                val first = PlayerDataMerge.readSave(firstBytes)
+                val second = PlayerDataMerge.readSave(secondBytes)
+                val changed = PlayerDataMerge.TRAVELLING_KEYS.filter { first.get(it) != second.get(it) }
+                helper.assertTrue(
+                    PlayerDataMerge.travellingDigest(firstBytes).contentEquals(PlayerDataMerge.travellingDigest(secondBytes)),
+                    "An idle player's travelling data changed between two saves a second apart: " +
+                        changed.joinToString { "$it ${first.get(it)} -> ${second.get(it)}" },
+                )
+                helper.level.server.playerList.remove(player)
+                helper.succeed()
+            }
+        }
     }
 
     @JvmStatic

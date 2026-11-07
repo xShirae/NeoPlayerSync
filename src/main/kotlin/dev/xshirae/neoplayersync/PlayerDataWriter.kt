@@ -37,10 +37,15 @@ internal class PlayerWrite(
 internal class PlayerDataWriter(
     private val store: PlayerDataStore,
     private val executor: ScheduledExecutorService,
+    /** What must change before a save is worth sending. The whole save by default. */
+    private val fingerprint: (ByteArray) -> ByteArray = { it },
     private val onLost: (playerId: UUID, sessionId: UUID) -> Unit,
 ) {
     private val lock = Any()
     private val pending = LinkedHashMap<UUID, PlayerWrite>()
+
+    /** The fingerprint each session last stored. Only the writer thread uses it. */
+    private val lastSent = HashMap<UUID, ByteArray>()
     private var inFlight: UUID? = null
     private var draining = false
     private var retryMillis = FIRST_RETRY_MILLIS
@@ -85,6 +90,8 @@ internal class PlayerDataWriter(
                 send(write)
             } catch (exception: Exception) {
                 NeoPlayerSync.LOGGER.error("Could not save player data for {}. Retrying in {} ms.", write.playerId, retryMillis, exception)
+                // The write may have landed before the error, so the stored save is unknown until the next one goes out.
+                lastSent.remove(write.sessionId)
                 retryLater(write)
                 return
             }
@@ -98,11 +105,29 @@ internal class PlayerDataWriter(
 
     private fun send(write: PlayerWrite): Boolean {
         val data = write.data
-        return when {
-            data == null -> store.release(write.playerId, write.sessionId)
-            write.release -> store.saveAndRelease(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
-            else -> store.save(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
+        if (data == null) {
+            lastSent.remove(write.sessionId)
+            return store.release(write.playerId, write.sessionId)
         }
+        val print = fingerprintOrNull(write, data)
+        // An idle player's timed save repeats what is stored. A release must still go out, or the row stays held.
+        if (!write.release && print != null && print.contentEquals(lastSent[write.sessionId])) return true
+
+        val owned = if (write.release) {
+            store.saveAndRelease(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
+        } else {
+            store.save(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
+        }
+        if (owned && !write.release && print != null) lastSent[write.sessionId] = print else lastSent.remove(write.sessionId)
+        return owned
+    }
+
+    /** A save the fingerprint cannot read is still sent, so a bad file never blocks the upload. */
+    private fun fingerprintOrNull(write: PlayerWrite, data: ByteArray): ByteArray? = try {
+        fingerprint(data)
+    } catch (exception: Exception) {
+        NeoPlayerSync.LOGGER.warn("Could not compare the save of {} with the last one, so sending it in full", write.playerId, exception)
+        null
     }
 
     private fun retryLater(failed: PlayerWrite) {

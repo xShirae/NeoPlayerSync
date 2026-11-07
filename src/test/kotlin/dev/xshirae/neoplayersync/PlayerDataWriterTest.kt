@@ -96,6 +96,40 @@ class PlayerDataWriterTest {
         assertEquals(99L, saved.savedTick)
     }
 
+    private fun storedTick(): Int = checkNotNull(database).intQuery("SELECT saved_tick FROM $SCHEMA.neoplayersync_player")
+
+    @Test
+    fun `a save that matches the stored one is skipped`() {
+        writer.submit(save(1, 2, 3, tick = 1L))
+        assertFlushed()
+        writer.submit(save(1, 2, 3, tick = 2L))
+        assertFlushed()
+        assertEquals(1, storedTick(), "the unchanged save should not be sent")
+
+        writer.submit(save(1, 2, 4, tick = 3L))
+        assertFlushed()
+        assertEquals(3, storedTick(), "a changed save should be sent")
+    }
+
+    @Test
+    fun `a release is sent even when the save matches`() {
+        writer.submit(save(1, 2, 3, tick = 1L))
+        assertFlushed()
+        writer.submit(save(1, 2, 3, tick = 2L, release = true))
+        assertFlushed()
+        assertEquals(2L, assertNotNull(storedAndClaim()?.saved, "the player should be free").savedTick)
+    }
+
+    @Test
+    fun `a save the fingerprint cannot read is still sent`() {
+        val strict = PlayerDataWriter(checkNotNull(database).newStore(), executor, fingerprint = { error("not a save file") }) { _, _ -> }
+        strict.submit(save(1, 2, 3, tick = 1L))
+        assertTrue(strict.awaitIdle(10_000L))
+        strict.submit(save(1, 2, 3, tick = 2L))
+        assertTrue(strict.awaitIdle(10_000L))
+        assertEquals(2, storedTick(), "without a fingerprint, every save must go out")
+    }
+
     @Test
     fun `a server that lost the player reports it and changes nothing`() {
         checkNotNull(database).sql("UPDATE $SCHEMA.neoplayersync_player SET owner_session = gen_random_uuid()")

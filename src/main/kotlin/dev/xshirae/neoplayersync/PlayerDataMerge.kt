@@ -8,6 +8,9 @@ import net.minecraft.nbt.NbtIo
 import net.minecraft.nbt.NbtUtils
 import net.minecraft.util.datafix.DataFixTypes
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.security.MessageDigest
 
 /** Decides which parts of a stored character replace the parts of this server's own save file. */
 internal object PlayerDataMerge {
@@ -38,6 +41,19 @@ internal object PlayerDataMerge {
 
     fun readSave(bytes: ByteArray): CompoundTag =
         NbtIo.readCompressed(ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap())
+
+    /**
+     * SHA-256 of only the [TRAVELLING_KEYS] in a save. Whole saves of an idle player differ from one save to the next,
+     * while the part other servers load stays the same.
+     */
+    fun travellingDigest(save: ByteArray): ByteArray {
+        val stored = readSave(save)
+        val travelling = CompoundTag()
+        for (key in TRAVELLING_KEYS) stored.get(key)?.let { travelling.put(key, it) }
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { NbtIo.write(travelling, it) }
+        return MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())
+    }
 
     /** Refuses data from a newer game version, because vanilla cannot downgrade it. */
     fun upgrade(tag: CompoundTag, fixer: DataFixer): CompoundTag {

@@ -6,6 +6,7 @@ import net.minecraft.nbt.NbtIo
 import net.minecraft.nbt.NbtUtils
 import java.io.ByteArrayOutputStream
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -74,5 +75,15 @@ class PlayerDataMergeTest {
         val bytes = ByteArrayOutputStream().also { NbtIo.writeCompressed(original, it) }.toByteArray()
         assertEquals(12, PlayerDataMerge.readSave(bytes).getIntOr("XpLevel", -1))
         assertFailsWith<Exception> { PlayerDataMerge.readSave(byteArrayOf(1, 2, 3)) }
+    }
+
+    @Test
+    fun `the digest follows only the keys that travel`() {
+        fun digest(vararg values: Pair<String, Int>) = PlayerDataMerge.travellingDigest(
+            ByteArrayOutputStream().also { NbtIo.writeCompressed(tag(*values), it) }.toByteArray(),
+        )
+        val idle = digest("XpLevel" to 5, "Health" to 20, "Pos" to 1)
+        assertContentEquals(idle, digest("XpLevel" to 5, "Health" to 20, "Pos" to 2), "a key that stays on each server must not count")
+        assertFalse(idle.contentEquals(digest("XpLevel" to 6, "Health" to 20, "Pos" to 1)), "a travelling key must count")
     }
 }
