@@ -9,20 +9,16 @@ NeoPlayerSync stores the player in one PostgreSQL database that all your servers
 - inventory, armor, off hand and ender chest
 - health, hunger and potion effects
 - experience and the recipe book
-- the player data of every other mod you run
+- your mods' player attachments and persistent data, such as Curios slots
 
 Position, spawn point, advancements and statistics stay on each server.
 
+Some mods keep player data in a world save instead of on the player. That data stays on each server too. Sophisticated Backpacks stores backpack contents this way, so a backpack opens empty or out of date on the next server. Project MMO stores skill XP this way, so a player's skills don't follow them.
+
 ## What you need
 
-- Minecraft 26.1.2, 26.2 or 26.3, with the matching jar:
-
-  | Minecraft | NeoForge | Jar |
-  | --- | --- | --- |
-  | 26.1.2 | 26.1.2.114 or newer | `neoplayersync-<version>+26.1.jar` |
-  | 26.2 | 26.2.0.88 or newer | `neoplayersync-<version>+26.2.jar` |
-  | 26.3 | 26.3.0.99 or newer | `neoplayersync-<version>+26.3.jar` |
-
+- Minecraft 26.1.2, 26.2 or 26.3. One jar works on all three.
+- NeoForge 26.1.2.114, 26.2.0.88 or 26.3.0.99, or a newer build of the same line
 - [Kotlin for Forge](https://www.curseforge.com/minecraft/mc-mods/kotlin-for-forge) 6.4.0
 - a PostgreSQL server (we test with 17.6)
 - a proxy such as Velocity, with player forwarding set up
@@ -83,7 +79,7 @@ Only one server can borrow a player at a time, so two servers can never overwrit
 
 ## For mod developers
 
-Most mods work with no changes. Your mod's player attachments and persistent data live in the player's save file, and NeoPlayerSync moves that whole file.
+Most mods work with no changes. NeoPlayerSync moves your mod's player attachments and persistent data with the player. It leaves behind anything you store in a world save (`SavedData`) or under your own key in the player file. To make that data travel, keep it in a player attachment.
 
 Two cases need a few lines from you.
 
@@ -139,7 +135,7 @@ You need Java 25. On Windows:
 .\tools\run-gradle.ps1 build
 ```
 
-The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`. It builds the 26.3 jar into `build/libs`. Add `-Pmc=26.1` or `-Pmc=26.2` to build for another version.
+The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`. It builds the jar into `build/libs`, and that one jar runs on 26.1.2, 26.2 and 26.3.
 
 Some tests need a real database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
 
@@ -150,10 +146,10 @@ Some tests need a real database. Unpack the PostgreSQL Windows binaries so that 
 .\tools\test-postgres.ps1 stop
 ```
 
-Add the same `-Pmc=` to test another version, for example:
+The tests run on 26.1.2. Add `-Pmc=26.2` or `-Pmc=26.3` to run them on a newer version. Keep the quotes, or PowerShell splits the version at the dot:
 
 ```powershell
-.\tools\run-gradle.ps1 build runGameTestServer -Pmc=26.1 --project-prop=includeGameTests=true
+.\tools\run-gradle.ps1 runGameTestServer '-Pmc=26.3' --project-prop=includeGameTests=true
 ```
 
 The script runs a throwaway database on `127.0.0.1:5433`. Without it, the database tests skip themselves.

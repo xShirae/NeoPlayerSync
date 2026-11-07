@@ -4,18 +4,14 @@ plugins {
     id 'net.neoforged.moddev' version '2.0.148'
 }
 
-// One source builds for each Minecraft line, against the NeoForge release its tests ran on. Pick one with -Pmc=26.1.
-def targets = [
-        '26.1': [neo: '26.1.2.114', minecraftRange: '[26.1.2,26.2)', neoRange: '[26.1.2.114,26.2)'],
-        '26.2': [neo: '26.2.0.88', minecraftRange: '[26.2,26.3)', neoRange: '[26.2.0.88,26.3)'],
-        '26.3': [neo: '26.3.0.99', minecraftRange: '[26.3,26.4)', neoRange: '[26.3.0.99,26.4)'],
-]
-def mc = providers.gradleProperty('mc').getOrElse('26.3')
-def target = targets[mc]
-if (target == null) throw new GradleException("Unknown -Pmc=${mc}. Use one of ${targets.keySet()}.")
+// The jar compiles against the oldest line and runs on all of them. -Pmc=26.2 or -Pmc=26.3 runs the server and tests on a newer one.
+def neoVersions = ['26.1': '26.1.2.114', '26.2': '26.2.0.88', '26.3': '26.3.0.99']
+def mc = providers.gradleProperty('mc').getOrElse('26.1')
+def neo = neoVersions[mc]
+if (neo == null) throw new GradleException("Unknown -Pmc=${mc}. Use one of ${neoVersions.keySet()}.")
 
 group = mod_group_id
-version = "${mod_version}+${mc}"
+version = mod_version
 
 base {
     archivesName = mod_id
@@ -42,7 +38,7 @@ dependencies {
 }
 
 neoForge {
-    version = target.neo
+    version = neo
 
     mods {
         "${mod_id}" {
@@ -82,8 +78,8 @@ neoForge {
 tasks.named('processResources', ProcessResources).configure {
     def replaceProperties = [
             loader_version_range   : loader_version_range,
-            minecraft_version_range: target.minecraftRange,
-            neo_version_range      : target.neoRange,
+            minecraft_version_range: minecraft_version_range,
+            neo_version_range      : neo_version_range,
             mod_id                 : mod_id,
             mod_version            : version,
             mod_name               : mod_name,
