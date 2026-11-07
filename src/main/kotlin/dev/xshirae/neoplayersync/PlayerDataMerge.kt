@@ -1,12 +1,21 @@
 package dev.xshirae.neoplayersync
 
 import com.mojang.datafixers.DataFixer
+import com.mojang.serialization.Codec
 import net.minecraft.SharedConstants
+import net.minecraft.core.HolderLookup
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
+import net.minecraft.nbt.NbtOps
 import net.minecraft.nbt.NbtUtils
+import net.minecraft.nbt.Tag
 import net.minecraft.util.datafix.DataFixTypes
+import net.minecraft.world.ItemStackWithSlot
+import net.minecraft.world.effect.MobEffectInstance
+import net.minecraft.world.entity.ai.attributes.AttributeInstance
+import net.minecraft.world.item.ItemStack
+import net.neoforged.neoforge.registries.NeoForgeRegistries
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -35,9 +44,11 @@ internal object PlayerDataMerge {
         "XpSeed",
         "Score",
         "recipeBook",
-        "neoforge:attachments",
+        ATTACHMENTS,
         "NeoForgeData",
     )
+
+    private const val ATTACHMENTS = "neoforge:attachments"
 
     fun readSave(bytes: ByteArray): CompoundTag =
         NbtIo.readCompressed(ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap())
@@ -61,6 +72,29 @@ internal object PlayerDataMerge {
         val current = SharedConstants.getCurrentVersion().dataVersion().version()
         check(version <= current) { "Player data version $version is newer than this server's $current" }
         return DataFixTypes.PLAYER.updateToCurrentVersion(fixer, tag, version)
+    }
+
+    /**
+     * Each part of an upgraded [save] that this server would drop on load, such as an item or attachment from a mod it
+     * lacks. Vanilla throws away all armor or all effects when one entry fails, and the next save would upload the loss.
+     */
+    fun unreadableParts(save: CompoundTag, registries: HolderLookup.Provider): List<String> {
+        val ops = registries.createSerializationContext(NbtOps.INSTANCE)
+        val problems = mutableListOf<String>()
+        fun check(key: String, entry: Tag, codec: Codec<*>) {
+            codec.parse(ops, entry).error().ifPresent { problems += "$key: ${it.message()}" }
+        }
+        save.getListOrEmpty("Inventory").forEach { check("Inventory", it, ItemStackWithSlot.CODEC) }
+        save.getListOrEmpty("EnderItems").forEach { check("EnderItems", it, ItemStackWithSlot.CODEC) }
+        save.getCompoundOrEmpty("equipment").let { equipment ->
+            equipment.keySet().forEach { slot -> equipment.get(slot)?.let { check("equipment", it, ItemStack.CODEC) } }
+        }
+        save.getListOrEmpty("attributes").forEach { check("attributes", it, AttributeInstance.Packed.CODEC) }
+        save.getListOrEmpty("active_effects").forEach { check("active_effects", it, MobEffectInstance.CODEC) }
+
+        val known = NeoForgeRegistries.ATTACHMENT_TYPES.keySet().mapTo(HashSet()) { it.toString() }
+        save.getCompoundOrEmpty(ATTACHMENTS).keySet().filterNot(known::contains).forEach { problems += "$ATTACHMENTS: unknown type $it" }
+        return problems
     }
 
     /** Upgrade both tags first. The merge drops a travelling key that [stored] lacks, such as an effect that ended. */

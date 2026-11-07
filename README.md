@@ -27,6 +27,8 @@ Players don't install anything. The proxy doesn't need the mod either.
 
 Run the same Minecraft version on every server of a network. A server refuses to load a character that a newer version saved.
 
+Give every synced server the mods whose items or player data your players carry. A server that lacks one would drop those items and that data, and its next save would erase them everywhere, so it refuses such a player instead. They keep their character and can join another server. For a hub or fallback server with fewer mods, set `enabled = false` there: it then keeps its own separate character for each player and never touches the database.
+
 Update NeoPlayerSync on every server together, too. The first updated server can upgrade the database tables, and after that an older NeoPlayerSync refuses to start. Servers that are already running keep working.
 
 ## Setup

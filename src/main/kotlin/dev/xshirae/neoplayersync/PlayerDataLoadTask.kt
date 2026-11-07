@@ -1,6 +1,7 @@
 package dev.xshirae.neoplayersync
 
 import com.mojang.datafixers.DataFixer
+import net.minecraft.core.HolderLookup
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
@@ -63,6 +64,7 @@ internal class PlayerDataLoadTask(
     private val executor: ScheduledExecutorService,
     private val saveFolder: Path,
     private val fixer: DataFixer,
+    private val registries: HolderLookup.Provider,
     private val serverName: String,
     private val waitMillis: Long = WAIT_MILLIS,
     private val staleMillis: Long = STALE_MILLIS,
@@ -116,6 +118,11 @@ internal class PlayerDataLoadTask(
                 "Player data schema ${claim.schemaVersion} is newer than this build's ${PlayerDataStore.PLAYER_DATA_SCHEMA}"
             }
             claim.saved?.let { writeLocalFile(it.data) }
+        } catch (exception: UnreadableCharacter) {
+            NeoPlayerSync.LOGGER.warn("Refused {}: {}", playerId, exception.message)
+            release()
+            client.refuse(MISSING_MOD)
+            return
         } catch (exception: Exception) {
             NeoPlayerSync.LOGGER.error("Could not load player data for {}", playerId, exception)
             release()
@@ -130,6 +137,8 @@ internal class PlayerDataLoadTask(
 
     private fun writeLocalFile(data: ByteArray) {
         val stored = PlayerDataMerge.upgrade(PlayerDataMerge.readSave(data), fixer)
+        val unreadable = PlayerDataMerge.unreadableParts(stored, registries)
+        if (unreadable.isNotEmpty()) throw UnreadableCharacter(unreadable)
         val file = saveFolder.resolve("$playerId.dat")
         val merged = PlayerDataMerge.merge(stored, readLocalFile(file))
 
@@ -183,5 +192,13 @@ internal class PlayerDataLoadTask(
 
         val LOAD_FAILED: Component = Component.literal("Your character could not be loaded. Your data is safe; please try again later.")
         val STILL_HELD: Component = Component.literal("Your character is still being saved by another server. Please try again.")
+        val MISSING_MOD: Component = Component.literal(
+            "Your character has items or data from a mod this server doesn't have. Your data is safe; please join another server.",
+        )
     }
 }
+
+/** The stored character holds parts this server cannot load, so admitting the player would lose them. */
+private class UnreadableCharacter(parts: List<String>) : Exception(
+    "this server cannot load ${parts.size} part(s) of the character: ${parts.take(10).joinToString("; ")}",
+)

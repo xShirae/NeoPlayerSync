@@ -1,10 +1,14 @@
 package dev.xshirae.neoplayersync
 
 import net.minecraft.SharedConstants
+import net.minecraft.core.RegistryAccess
+import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.nbt.CompoundTag
+import net.minecraft.nbt.ListTag
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
 import net.minecraft.nbt.NbtUtils
+import net.minecraft.nbt.Tag
 import net.minecraft.network.chat.Component
 import net.minecraft.util.datafix.DataFixers
 import java.io.ByteArrayOutputStream
@@ -61,6 +65,12 @@ class PlayerDataLoadTaskTest {
     }
 
     private val player = UUID.randomUUID()
+
+    /**
+     * Without a server, items have no components yet, so even a diamond reads as unreadable here.
+     * PlayerDataMergeGameTests checks that real items pass.
+     */
+    private val registries = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY)
     private var database: PlayerDataTestDatabase? = null
     private lateinit var store: PlayerDataStore
     private lateinit var executor: ScheduledThreadPoolExecutor
@@ -98,6 +108,7 @@ class PlayerDataLoadTaskTest {
             executor = executor,
             saveFolder = folder,
             fixer = DataFixers.getDataFixer(),
+            registries = registries,
             serverName = "test",
             waitMillis = waitMillis,
             staleMillis = staleMillis,
@@ -190,6 +201,44 @@ class PlayerDataLoadTaskTest {
         assertFalse(localFile.exists())
     }
 
+    private fun itemEntry(id: String) = CompoundTag().apply {
+        putByte("Slot", 0)
+        putString("id", id)
+        putInt("count", 7)
+    }
+
+    private fun saveWith(key: String, value: Tag): CompoundTag = currentSave("XpLevel" to 30).apply { put(key, value) }
+
+    private fun assertRefusedForMissingMod(stored: CompoundTag) {
+        storeCharacter(bytesOf(stored))
+        val local = bytesOf(currentSave("XpLevel" to 5))
+        localFile.writeBytes(local)
+        val client = FakeClient()
+        join(client)
+        assertEquals(PlayerDataLoadTask.MISSING_MOD, client.refusedWith)
+        assertContentEquals(local, localFile.readBytes())
+        assertEquals(0, ownerCount(), "the row must be released")
+        assertEquals(30, PlayerDataMerge.readSave(assertNotNull(storedAndClaim()).data).getIntOr("XpLevel", -1), "the stored character must stay")
+    }
+
+    private fun storedAndClaim(): SavedPlayer? = store.claim(player, UUID.randomUUID(), "checker")?.saved
+
+    @Test
+    fun `an item from a mod this server lacks refuses the player`() {
+        assertRefusedForMissingMod(saveWith("Inventory", ListTag().apply { add(itemEntry("missingmod:kunai")) }))
+    }
+
+    @Test
+    fun `armor from a mod this server lacks refuses the player`() {
+        val equipment = CompoundTag().apply { put("head", itemEntry("missingmod:headband").apply { remove("Slot") }) }
+        assertRefusedForMissingMod(saveWith("equipment", equipment))
+    }
+
+    @Test
+    fun `an attachment from a mod this server lacks refuses the player`() {
+        assertRefusedForMissingMod(saveWith("neoforge:attachments", CompoundTag().apply { put("missingmod:chakra", CompoundTag()) }))
+    }
+
     @Test
     fun `an unreadable local file only costs the position`() {
         storeCharacter(bytesOf(currentSave("XpLevel" to 30)))
@@ -277,7 +326,7 @@ class PlayerDataLoadTaskTest {
     @Test
     fun `a client that left before the claim never takes the row`() {
         val client = FakeClient(connectedAtStart = false)
-        PlayerDataLoadTask(player, client, store, executor, folder, DataFixers.getDataFixer(), "test").run(Consumer { })
+        PlayerDataLoadTask(player, client, store, executor, folder, DataFixers.getDataFixer(), registries, "test").run(Consumer { })
         executor.submit { }.get()
         assertEquals(0, ownerCount())
         assertFalse(client.admitted)

@@ -68,6 +68,7 @@ internal class PlayerDataService(
                 executor = claimThread,
                 saveFolder = server.playerList.playerIo.playerDir.toPath(),
                 fixer = server.fixerUpper,
+                registries = server.registryAccess(),
                 serverName = serverName,
                 onAdmitted = { sessionId, claim -> addSession(playerId, sessionId, claim) { client.connected } },
             ),

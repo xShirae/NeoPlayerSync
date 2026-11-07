@@ -1,6 +1,7 @@
 package dev.xshirae.neoplayersync
 
 import net.minecraft.SharedConstants
+import net.minecraft.core.registries.Registries
 import net.minecraft.gametest.framework.GameTestHelper
 import net.minecraft.nbt.NbtUtils
 import net.minecraft.server.level.ServerPlayer
@@ -10,6 +11,7 @@ import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
+import net.minecraft.world.item.enchantment.Enchantments
 import net.minecraft.world.level.storage.TagValueInput
 import java.nio.file.Files
 
@@ -36,6 +38,22 @@ object PlayerDataMergeGameTests {
 
         val missing = PlayerDataMerge.TRAVELLING_KEYS.filterNot(save::contains)
         helper.assertTrue(missing.isEmpty(), "Keys missing from a real player save: $missing")
+        helper.level.server.playerList.remove(player)
+        helper.succeed()
+    }
+
+    /** A false alarm here would lock every player out, so a real save must pass the check. */
+    @JvmStatic
+    @SyncGameTest(template = "empty", batch = "player-data")
+    fun aRealSaveHasNoUnreadableParts(helper: GameTestHelper) {
+        val player = equippedPlayer(helper)
+        player.inventory.setItem(1, ItemStack(Items.DIAMOND_SWORD).apply {
+            enchant(helper.level.registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS), 3)
+        })
+        val save = player.saveEntityForTest()
+
+        val unreadable = PlayerDataMerge.unreadableParts(save, helper.level.registryAccess())
+        helper.assertTrue(unreadable.isEmpty(), "A real save was reported unreadable: $unreadable")
         helper.level.server.playerList.remove(player)
         helper.succeed()
     }
