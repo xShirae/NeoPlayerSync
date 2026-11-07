@@ -1,5 +1,7 @@
 package dev.xshirae.neoplayersync
 
+import com.google.gson.JsonObject
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -11,10 +13,12 @@ internal class PlayerWrite(
     val data: ByteArray?,
     val savedTick: Long,
     val release: Boolean,
+    /** [PlayerExtra] entries saved with [data]. Nothing changes them after the write is made, so any thread may read them. */
+    val extras: JsonObject = JsonObject(),
     /** When the game saved [data], on this server's own clock, so time spent waiting for the database still counts. */
     val savedAtNanos: Long = System.nanoTime(),
 ) {
-    /** A newer save replaces an unsent one and keeps any pending release. */
+    /** A newer save replaces an unsent one and keeps any pending release and any extra the newer one lacks. */
     fun mergedWith(newer: PlayerWrite): PlayerWrite {
         val newerData = newer.data != null
         return PlayerWrite(
@@ -23,6 +27,10 @@ internal class PlayerWrite(
             data = newer.data ?: data,
             savedTick = if (newerData) newer.savedTick else savedTick,
             release = release || newer.release,
+            extras = JsonObject().apply {
+                for ((id, entry) in extras.entrySet()) add(id, entry)
+                for ((id, entry) in newer.extras.entrySet()) add(id, entry)
+            },
             savedAtNanos = if (newerData) newer.savedAtNanos else savedAtNanos,
         )
     }
@@ -39,6 +47,8 @@ internal class PlayerDataWriter(
     private val executor: ScheduledExecutorService,
     /** What must change before a save is worth sending. The whole save by default. */
     private val fingerprint: (ByteArray) -> ByteArray = { it },
+    /** What of the extras must change before a save is worth sending. All of them by default. */
+    private val comparableExtras: (JsonObject) -> JsonObject = { it },
     private val onLost: (playerId: UUID, sessionId: UUID) -> Unit,
 ) {
     private val lock = Any()
@@ -65,9 +75,12 @@ internal class PlayerDataWriter(
         pending.keys.toSet() + setOfNotNull(inFlight)
     }
 
-    fun awaitIdle(timeoutMillis: Long): Boolean {
+    fun awaitIdle(timeoutMillis: Long): Boolean = awaitSent(timeoutMillis) { true }
+
+    /** Waits until no session that [matches] has unsent data. A failing write stays unsent and retries, so this times out. */
+    fun awaitSent(timeoutMillis: Long, matches: (UUID) -> Boolean): Boolean {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
-        while (sessionsWithUnsentWrites().isNotEmpty()) {
+        while (sessionsWithUnsentWrites().any(matches)) {
             if (System.nanoTime() - deadline >= 0L) return false
             Thread.sleep(IDLE_POLL_MILLIS)
         }
@@ -109,14 +122,15 @@ internal class PlayerDataWriter(
             lastSent.remove(write.sessionId)
             return store.release(write.playerId, write.sessionId)
         }
-        val print = fingerprintOrNull(write, data)
+        val extras = write.extras.toString()
+        val print = fingerprintOrNull(write, data)?.let { it + extrasDigest(write.extras) }
         // An idle player's timed save repeats what is stored. A release must still go out, or the row stays held.
         if (!write.release && print != null && print.contentEquals(lastSent[write.sessionId])) return true
 
         val owned = if (write.release) {
-            store.saveAndRelease(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
+            store.saveAndRelease(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis(), extras)
         } else {
-            store.save(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis())
+            store.save(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis(), extras)
         }
         if (owned && !write.release && print != null) lastSent[write.sessionId] = print else lastSent.remove(write.sessionId)
         return owned
@@ -129,6 +143,10 @@ internal class PlayerDataWriter(
         NeoPlayerSync.LOGGER.warn("Could not compare the save of {} with the last one, so sending it in full", write.playerId, exception)
         null
     }
+
+    /** A hash rather than the text, which can run to hundreds of kilobytes for each online player. */
+    private fun extrasDigest(extras: JsonObject): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(comparableExtras(extras).toString().toByteArray())
 
     private fun retryLater(failed: PlayerWrite) {
         synchronized(lock) {

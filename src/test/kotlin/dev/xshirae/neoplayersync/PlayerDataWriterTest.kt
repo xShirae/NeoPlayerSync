@@ -1,8 +1,10 @@
 package dev.xshirae.neoplayersync
 
+import com.google.gson.JsonObject
 import java.sql.SQLException
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.AfterTest
@@ -46,6 +48,20 @@ class PlayerDataWriterTest {
     fun tearDown() {
         if (::executor.isInitialized) executor.shutdownNow()
         database?.close()
+    }
+
+    @Test
+    fun `waiting for chosen sessions ignores the others`() {
+        val gate = CountDownLatch(1)
+        executor.execute { gate.await() }
+        writer.submit(save(1))
+        try {
+            assertTrue(writer.awaitSent(100L) { it != session }, "another session's save should not hold this up")
+            assertFalse(writer.awaitSent(100L) { it == session }, "an unsent save should time out")
+        } finally {
+            gate.countDown()
+        }
+        assertTrue(writer.awaitSent(10_000L) { it == session }, "the save did not land")
     }
 
     @Test
@@ -109,6 +125,40 @@ class PlayerDataWriterTest {
         writer.submit(save(1, 2, 4, tick = 3L))
         assertFlushed()
         assertEquals(3, storedTick(), "a changed save should be sent")
+    }
+
+    private fun extras(vararg entries: Pair<String, Int>) = JsonObject().apply { entries.forEach { (id, value) -> addProperty(id, value) } }
+
+    @Test
+    fun `a save whose only change is in its extras is sent`() {
+        writer.submit(PlayerWrite(player, session, byteArrayOf(1), 1L, release = false, extras = extras("advancements" to 1)))
+        assertFlushed()
+        writer.submit(PlayerWrite(player, session, byteArrayOf(1), 2L, release = false, extras = extras("advancements" to 2)))
+        assertFlushed()
+        assertEquals(2, storedTick(), "a new advancement alone must reach the database")
+    }
+
+    @Test
+    fun `a change only in what the comparison leaves out is skipped`() {
+        val ignoringTime = PlayerDataWriter(checkNotNull(database).newStore(), executor, comparableExtras = { JsonObject().apply { add("advancements", it.get("advancements")) } }) { _, _ -> }
+        fun send(tick: Long, advancements: Int) {
+            ignoringTime.submit(PlayerWrite(player, session, byteArrayOf(1), tick, release = false, extras = extras("advancements" to advancements, "time" to tick.toInt())))
+            assertTrue(ignoringTime.awaitIdle(10_000L))
+        }
+        send(1L, advancements = 1)
+        send(2L, advancements = 1)
+        assertEquals(1, storedTick(), "a save whose only change is left out of the comparison should not be sent")
+        send(3L, advancements = 2)
+        assertEquals(3, storedTick(), "a real change should be sent, with the left-out part too")
+    }
+
+    @Test
+    fun `merging keeps every extra and the newest value of each`() {
+        val older = PlayerWrite(player, session, byteArrayOf(1), 1L, release = false, extras = extras("advancements" to 1, "statistics" to 1))
+        val newer = PlayerWrite(player, session, byteArrayOf(2), 2L, release = false, extras = extras("advancements" to 2))
+        val merged = older.mergedWith(newer).extras
+        assertEquals(2, merged.get("advancements").asInt)
+        assertEquals(1, merged.get("statistics").asInt, "an extra only the older save carried must still go out")
     }
 
     @Test

@@ -42,6 +42,16 @@ internal object DatabaseConfig {
     private val serverName = builder
         .comment("Name shown in the database as the player's current server. Blank uses this server's port.")
         .define("server_name", "")
+    private val syncAdvancements = builder
+        .comment(
+            "Move advancements with the player. Use the same value on every server: a server set to false keeps its own " +
+                "copy and leaves the stored one alone. When you turn this on, the first server to save a player decides " +
+                "their advancements, replacing what other servers kept on their own. Needs a restart.",
+        )
+        .define("sync_advancements", false)
+    private val syncStatistics = builder
+        .comment("Move statistics with the player, such as blocks mined and time played. Works like sync_advancements.")
+        .define("sync_statistics", false)
 
     val SPEC: ModConfigSpec = builder.build()
 
@@ -62,6 +72,10 @@ internal object DatabaseConfig {
     }
 
     fun enabled(): Boolean = enabled.get()
+
+    fun syncAdvancements(): Boolean = syncAdvancements.get()
+
+    fun syncStatistics(): Boolean = syncStatistics.get()
 
     fun settings(): DatabaseSettings = DatabaseSettings.validated(
         host = host.get(),

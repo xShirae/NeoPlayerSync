@@ -1,10 +1,15 @@
 package dev.xshirae.neoplayersync
 
+import com.mojang.authlib.GameProfile
 import net.minecraft.gametest.framework.GameTestHelper
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
+import net.minecraft.resources.Identifier
+import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
+import net.minecraft.server.network.CommonListenerCookie
+import net.minecraft.stats.Stats
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.inventory.AbstractContainerMenu
@@ -16,6 +21,7 @@ import org.opentest4j.TestAbortedException
 import java.nio.file.Files
 import java.sql.SQLException
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -54,7 +60,12 @@ object PlayerDataSyncGameTests {
         fun ownedCount(player: ServerPlayer): Int =
             database.intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player WHERE player_id = '${player.uuid}' AND owner_session IS NOT NULL")
 
-        fun storedInventoryCount(player: ServerPlayer): Int {
+        fun storedExtraHas(player: ServerPlayer, path: String): Boolean =
+            database.intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player WHERE player_id = '${player.uuid}' AND extra -> $path") == 1
+
+        fun storedInventoryCount(player: ServerPlayer): Int = storedSave(player)?.getListOrEmpty("Inventory")?.size ?: -1
+
+        fun storedSave(player: ServerPlayer): CompoundTag? {
             val stored = database.newConnectionForTest().use { connection ->
                 connection.prepareStatement("SELECT data FROM neoplayersync_player WHERE player_id = '${player.uuid}'").use { query ->
                     query.executeQuery().use { row ->
@@ -62,8 +73,8 @@ object PlayerDataSyncGameTests {
                         row.getBytes(1)
                     }
                 }
-            } ?: return -1
-            return PlayerDataMerge.readSave(stored).getListOrEmpty("Inventory").size
+            } ?: return null
+            return PlayerDataMerge.readSave(stored)
         }
 
         /**
@@ -95,6 +106,7 @@ object PlayerDataSyncGameTests {
         writeStore: (PlayerDataTestDatabase) -> PlayerDataStore = { it.newStore() },
         // No time to spare, so exactly one queued inventory save runs per tick and counts don't depend on machine speed.
         inventorySaveBudgetNanos: Long = 0L,
+        extras: (MinecraftServer) -> List<PlayerExtra> = { emptyList() },
         test: Fixture.() -> Unit,
     ) {
         val database = try {
@@ -105,7 +117,14 @@ object PlayerDataSyncGameTests {
             return
         }
         database.newStore().prepareTables()
-        val service = PlayerDataService(helper.level.server, database.newStore(), writeStore(database), "test", inventorySaveBudgetNanos)
+        val service = PlayerDataService(
+            helper.level.server,
+            database.newStore(),
+            writeStore(database),
+            "test",
+            inventorySaveBudgetNanos,
+            extras(helper.level.server),
+        )
         PlayerDataSync.service = service
         Fixture(helper, database, service).test()
     }
@@ -172,6 +191,77 @@ object PlayerDataSyncGameTests {
         }
     }
 
+    /**
+     * Vanilla writes advancements and statistics only after the player file, which sends the final upload, so the export
+     * must save them itself or the last thing earned before leaving would be missing.
+     */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-extras")
+    fun advancementsAndStatisticsEarnedJustBeforeLeavingAreStored(helper: GameTestHelper) = withDatabase(
+        helper,
+        extras = { listOf(PlayerExtras.advancements(it), PlayerExtras.statistics(it)) },
+    ) {
+        val (player, _) = claimedPlayer("sync-extras")
+        val root = checkNotNull(helper.level.server.advancements.get(Identifier.withDefaultNamespace("story/root")))
+        player.advancements.award(root, "crafting_table")
+        player.awardStat(Stats.JUMP)
+        helper.level.server.playerList.remove(player)
+        finishWhen("The final upload should carry the new advancement and statistic, and free the player") {
+            ownedCount(player) == 0 &&
+                storedExtraHas(player, "'advancements' ? 'minecraft:story/root'") &&
+                storedExtraHas(player, "'statistics' -> 'stats' -> 'minecraft:custom' ? 'minecraft:jump'")
+        }
+    }
+
+    /** A marker planted in the stored advancements shows whether a save replaced them. */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-advancement-changes")
+    fun advancementsUploadOnlyAfterAGrantOrRevoke(helper: GameTestHelper) = withDatabase(
+        helper,
+        extras = { listOf(PlayerExtras.advancements(it)) },
+    ) {
+        val (player, _) = claimedPlayer("sync-adv")
+        val marker = "'advancements' ? 'marker'"
+        var step = -1
+        // Each step waits for the previous save to land, so a failed check repeats until the timeout reports it.
+        helper.succeedWhen {
+            when (step) {
+                -1 -> {
+                    // The first tick grants the recipes vanilla unlocks right away, which would count as a change below.
+                    helper.assertTrue(player.tickCount > 0, "The player should tick once")
+                    save(player)
+                    step++
+                }
+                0 -> {
+                    helper.assertTrue(storedExtraHas(player, "'advancements' ? 'DataVersion'"), "The first save should upload advancements")
+                    database.sql("UPDATE $SCHEMA.neoplayersync_player SET extra = jsonb_set(extra, '{advancements,marker}', 'true') WHERE player_id = '${player.uuid}'")
+                    // Health, because an item could unlock a recipe advancement and upload them for a real reason.
+                    player.health = 7f
+                    save(player)
+                    step++
+                }
+                1 -> {
+                    helper.assertTrue(storedSave(player)?.getFloatOr("Health", 0f) == 7f, "The second save should land")
+                    helper.assertTrue(storedExtraHas(player, marker), "A save without a grant or revoke must leave advancements alone")
+                    val root = checkNotNull(helper.level.server.advancements.get(Identifier.withDefaultNamespace("story/root")))
+                    player.advancements.award(root, "crafting_table")
+                    save(player)
+                    step++
+                }
+                else -> {
+                    helper.assertTrue(
+                        !storedExtraHas(player, marker) && storedExtraHas(player, "'advancements' ? 'minecraft:story/root'"),
+                        "A grant should upload advancements again",
+                    )
+                    helper.level.server.playerList.remove(player)
+                    finish()
+                    return@succeedWhen
+                }
+            }
+            helper.assertTrue(false, "Waiting for step $step")
+        }
+    }
+
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-failed-save")
     fun aFinalSaveThatFailsStillFreesThePlayer(helper: GameTestHelper) = withDatabase(helper) {
@@ -181,6 +271,31 @@ object PlayerDataSyncGameTests {
         service.onTick(1L)
         finishWhen("The claim should be given up") {
             (ownedCount(player) == 0 && savedCount(player) == 0).also { if (it) helper.level.server.playerList.remove(player) }
+        }
+    }
+
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-save-all")
+    fun savingEveryoneFailsWhileOneSaveFailsAndSucceedsOnceItIsGone(helper: GameTestHelper) = withDatabase(helper) {
+        val (player, _) = claimedPlayer("sync-all")
+        // Missing from the player list, so vanilla saves nothing and fires no event, as when its save fails.
+        val profile = GameProfile(UUID.randomUUID(), "syncghost")
+        val ghost = ServerPlayer(
+            helper.level.server, helper.level, profile, CommonListenerCookie.createInitial(profile, false).clientInformation(),
+        )
+        service.addSession(ghost.uuid, UUID.randomUUID()) { true }
+        service.onLoggedIn(ghost)
+        val withGhost = service.saveAllNow()
+        var withoutGhost: CompletableFuture<Int>? = null
+        finishWhen("Saving everyone should fail with the ghost, then save the one player once the ghost is gone") {
+            if (withoutGhost == null && withGhost.isDone) {
+                helper.assertTrue(withGhost.isCompletedExceptionally, "The failed save should fail the whole sync")
+                helper.assertTrue(savedCount(player) == 1, "The other player's save should still land")
+                service.onLoggedOut(ghost)
+                service.onTick(1L)
+                withoutGhost = service.saveAllNow()
+            }
+            (withoutGhost?.getNow(null) == 1).also { if (it) helper.level.server.playerList.remove(player) }
         }
     }
 

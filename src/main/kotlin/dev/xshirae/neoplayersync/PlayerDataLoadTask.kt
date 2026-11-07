@@ -66,9 +66,10 @@ internal class PlayerDataLoadTask(
     private val fixer: DataFixer,
     private val registries: HolderLookup.Provider,
     private val serverName: String,
-    private val waitMillis: Long = WAIT_MILLIS,
-    private val staleMillis: Long = STALE_MILLIS,
+    private val waitMillis: Long = LeaseTiming.WAIT.inWholeMilliseconds,
+    private val staleMillis: Long = LeaseTiming.STALE.inWholeMilliseconds,
     private val onAdmitted: (sessionId: UUID, claim: PlayerClaim) -> Unit = { _, _ -> },
+    private val extras: List<PlayerExtra> = emptyList(),
 ) : ICustomConfigurationTask {
     private val sessionId: UUID = UUID.randomUUID()
 
@@ -118,6 +119,8 @@ internal class PlayerDataLoadTask(
                 "Player data schema ${claim.schemaVersion} is newer than this build's ${PlayerDataStore.PLAYER_DATA_SCHEMA}"
             }
             claim.saved?.let { writeLocalFile(it.data) }
+            // A kind with nothing stored yet keeps this server's own copy, which the first save then uploads.
+            for (extra in extras) claim.extras.get(extra.id)?.let { extra.restore(playerId, it) }
         } catch (exception: UnreadableCharacter) {
             NeoPlayerSync.LOGGER.warn("Refused {}: {}", playerId, exception.message)
             release()
@@ -176,18 +179,6 @@ internal class PlayerDataLoadTask(
 
     companion object {
         val TYPE = ConfigurationTask.Type("${NeoPlayerSync.MOD_ID}:load")
-
-        /**
-         * Longer than both the 15-second lease and [STALE_MILLIS]. The watch starts with the first attempt and the lease
-         * runs out at most 15 seconds later, so this task takes over a crashed server's claim before it gives up.
-         */
-        private const val WAIT_MILLIS = 20_000L
-
-        /**
-         * Two 5-second heartbeats plus room for a slow reconnect. Once the database is back, a running server renews within
-         * this time, even after an outage expired every lease, so its waiting save lands before another server takes over.
-         */
-        private const val STALE_MILLIS = 12_000L
         private const val POLL_MILLIS = 250L
 
         val LOAD_FAILED: Component = Component.literal("Your character could not be loaded. Your data is safe; please try again later.")

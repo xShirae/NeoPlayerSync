@@ -48,24 +48,36 @@ class PlayerDataStoreTest {
     fun `setup on a current database changes nothing`() {
         store.claim(player, sessionA, "a")
         store.prepareTables()
-        assertEquals(2, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
+        assertEquals(3, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
         assertEquals(1, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_schema"))
         assertEquals(1, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player"))
     }
 
     @Test
-    fun `setup upgrades layout 1 to layout 2 and keeps the players`() {
+    fun `setup upgrades layout 1 to the current layout and keeps the players`() {
         assertNotNull(store.claim(player, sessionA, "a"))
+        sql("ALTER TABLE $SCHEMA.neoplayersync_player DROP COLUMN extra")
         sql("DROP INDEX $SCHEMA.neoplayersync_player_owner")
         sql("UPDATE $SCHEMA.neoplayersync_schema SET version = 1")
 
         store.prepareTables()
-        assertEquals(2, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
+        assertEquals(3, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
         assertEquals(
             1,
             intQuery("SELECT count(*) FROM pg_indexes WHERE schemaname = '$SCHEMA' AND indexname = 'neoplayersync_player_owner'"),
         )
         assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L), "the claim made before the upgrade should still hold")
+    }
+
+    @Test
+    fun `a row from layout 2 gains an empty extra column`() {
+        assertNotNull(store.claim(player, sessionA, "a"))
+        sql("ALTER TABLE $SCHEMA.neoplayersync_player DROP COLUMN extra")
+        sql("UPDATE $SCHEMA.neoplayersync_schema SET version = 2")
+
+        store.prepareTables()
+        assertTrue(store.saveAndRelease(player, sessionA, saveBytes, savedTick = 1L))
+        assertEquals(0, assertNotNull(store.claim(player, sessionB, "b")).extras.size())
     }
 
     @Test
@@ -116,6 +128,23 @@ class PlayerDataStoreTest {
         assertContentEquals(saveBytes, saved.data)
         assertEquals(500L, saved.savedTick)
         assertTrue(saved.elapsedMillis >= 0L)
+    }
+
+    @Test
+    fun `a save replaces only the extras it carries`() {
+        store.claim(player, sessionA, "a")
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L, extras = """{"advancements":{"a":1},"statistics":{"s":1}}"""))
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 2L, extras = """{"advancements":{"a":2}}"""))
+        assertTrue(store.saveAndRelease(player, sessionA, saveBytes, savedTick = 3L))
+
+        val extras = assertNotNull(store.claim(player, sessionB, "b")).extras
+        assertEquals(2, extras.getAsJsonObject("advancements").get("a").asInt)
+        assertEquals(1, extras.getAsJsonObject("statistics").get("s").asInt, "a kind the save did not carry must stay")
+    }
+
+    @Test
+    fun `a new player claims with no extras`() {
+        assertEquals(0, assertNotNull(store.claim(player, sessionA, "a")).extras.size())
     }
 
     @Test

@@ -1,8 +1,8 @@
 # NeoPlayerSync
 
-You run several NeoForge servers behind a proxy like Velocity. A player walks from one server to another. Without this mod, they arrive with an empty backpack, because each server keeps its own copy of the player.
+You run several NeoForge servers behind a proxy like Velocity. Each server keeps its own copy of every player, so a player who switches servers arrives with an empty inventory.
 
-NeoPlayerSync stores the player in one PostgreSQL database that all your servers share. When the player switches servers, the new server reads their character from that database, so they keep everything.
+NeoPlayerSync keeps one copy of each player in a PostgreSQL database that all your servers share. When a player switches servers, they bring their character with them.
 
 ## What travels with the player
 
@@ -10,26 +10,20 @@ NeoPlayerSync stores the player in one PostgreSQL database that all your servers
 - health, hunger and potion effects
 - experience and the recipe book
 - your mods' player attachments and persistent data, such as Curios slots
+- advancements and statistics, if you turn on `sync_advancements` or `sync_statistics`
 
-Position, spawn point, advancements and statistics stay on each server.
+Position and spawn point stay on each server.
 
-Some mods keep player data in a world save instead of on the player. That data stays on each server too. Sophisticated Backpacks stores backpack contents this way, so a backpack opens empty or out of date on the next server. Project MMO stores skill XP this way, so a player's skills don't follow them.
+Some mods store player data in the world save instead of on the player. That data stays behind until the mod's author moves it onto the player (see [For mod developers](#for-mod-developers)) or NeoPlayerSync adds support for that mod.
 
 ## What you need
 
-- Minecraft 26.1.2, 26.2 or 26.3. One jar works on all three.
-- NeoForge 26.1.2.114, 26.2.0.88 or 26.3.0.99, or a newer build of the same line
 - [Kotlin for Forge](https://www.curseforge.com/minecraft/mc-mods/kotlin-for-forge) 6.4.0
 - a PostgreSQL server (we test with 17.6)
 - a proxy such as Velocity, with player forwarding set up
+- a mod that lets NeoForge accept that forwarding, such as [Proxy Compatible Forge](https://modrinth.com/mod/proxy-compatible-forge)
 
-Players don't install anything. The proxy doesn't need the mod either.
-
-Run the same Minecraft version on every server of a network. A server refuses to load a character that a newer version saved.
-
-Give every synced server the mods whose items or player data your players carry. A server that lacks one would drop those items and that data, and its next save would erase them everywhere, so it refuses such a player instead. They keep their character and can join another server. For a hub or fallback server with fewer mods, set `enabled = false` there: it then keeps its own separate character for each player and never touches the database.
-
-Update NeoPlayerSync on every server together, too. The first updated server can upgrade the database tables, and after that an older NeoPlayerSync refuses to start. Servers that are already running keep working.
+Players and the proxy don't install anything.
 
 ## Setup
 
@@ -40,81 +34,107 @@ CREATE USER minecraft WITH PASSWORD 'pick-a-strong-password';
 CREATE DATABASE minecraft OWNER minecraft;
 ```
 
-NeoPlayerSync creates its own tables the first time it starts.
+NeoPlayerSync creates its own tables.
 
-**2. Install the mod.** Copy the jar into the `mods` folder of each server behind your proxy. Start each server once, then stop it. That creates `config/neoplayersync.toml`.
+**2. Install the mod.** Put the jar in the `mods` folder of each server. Start each server once and stop it. This creates `config/neoplayersync.toml`.
 
-**3. Fill in the config.** Open `config/neoplayersync.toml` on each server:
+**3. Fill in the config** on each server:
 
 ```toml
 enabled = true
-host = "10.0.0.5"        # your database's address
+host = "10.0.0.5"         # your database's address
 port = 5432
 database = "minecraft"
 user = "minecraft"
 password = "pick-a-strong-password"
-require_ssl = true       # set false only if the database runs on the same machine
-ssl_root_cert = ""       # see "Check the database's certificate" below
-server_name = "lobby"    # any name; the database shows it as the player's current server
+require_ssl = true        # set false only if the database runs on the same machine
+ssl_root_cert = ""        # see "Check the database's certificate" below
+server_name = "lobby"     # any name; the database shows it as the player's current server
+sync_advancements = false # true moves advancements with the player
+sync_statistics = false   # true moves statistics with the player
 ```
 
-[docs/default-config.toml](docs/default-config.toml) explains every setting.
+[docs/default-config.toml](docs/default-config.toml) explains every setting. Changes need a restart.
 
-**4. Start your servers.** Look for this line in each log:
+The file holds your database password. Keep it out of modpacks you share.
+
+**4. Start your servers.** Each log should show:
 
 ```
 NeoPlayerSync is storing players in Postgres.
 ```
 
-If a server can't reach the database, it refuses to start rather than letting players load an old copy of their character. It also refuses to start if `config/neoplayersync.toml` is not valid TOML. NeoForge replaces a broken file with defaults, which turn sync off; it keeps your version as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
+You can add the mod to a network that already has players. A player's current character goes into the database the first time a server saves them.
 
-The config file holds your database password. Keep it out of modpacks you share. NeoForge never sends it to players.
+## Keep your servers matched
 
-You can turn the mod on for a network that already has players. Each player's current character goes into the database the first time a server saves them.
+- **Same Minecraft version everywhere.** A server refuses a character saved by a newer version.
+- **Same mods everywhere.** A server missing a mod your players use refuses them, so their items and data from that mod don't get lost. To let players join a server with fewer mods, such as a hub, set `enabled = false` there.
+- **Same NeoPlayerSync version everywhere.** Update all servers together. A newer version may upgrade the database tables, and an older one then refuses to start. Servers already running keep working.
+- **Same `sync_advancements` and `sync_statistics` everywhere.** If you turn one on for a network that already has players, the first server to save a player decides what they keep. Other servers' copies get replaced.
 
-### Check the database's certificate
+A server with `enabled = false` keeps its own separate copy of each player and never touches the database.
 
-`require_ssl = true` encrypts the connection, but it doesn't prove your server reached your database. On a private network that's fine. If your servers reach the database over the internet or a shared cloud network, someone in between could pose as the database, read the password and change characters.
+## When a server won't start
 
-To stop that, give each server the certificate of the authority that signed your database's certificate, as a PEM file:
+A server that can't reach the database refuses to start. This stops players from loading an old copy of their character.
+
+A server also refuses to start if `config/neoplayersync.toml` is broken. NeoForge replaces a broken file with defaults, which turn sync off, and saves yours as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
+
+## Commands
+
+Both need operator permission level 2.
+
+- `/nps` (or `/nps health`) checks the database. It shows how long the database took to answer, how many players this server holds, and how many saves are waiting to go out. It gives up after 20 seconds.
+- `/nps sync` saves every player on this server now and waits until the database has them all. It reports how long that took, or that a save failed or took more than 20 seconds. The server keeps retrying a slow save. On a busy server it can cause a short lag spike.
+
+## How it works
+
+Think of the database as a library with one copy of each player. A server borrows a player when they join and returns them when they leave.
+
+1. A player joins. The server borrows their character from the database and loads it.
+2. While they play, the server sends their character back about a second after their inventory changes, once a minute, and when they respawn or leave. If nothing changed, it sends nothing.
+3. The player switches servers. The old server sends the character one last time and returns it. The new server waits for that, then borrows it.
+
+Only one server can borrow a player at a time, so two servers never overwrite each other.
+
+If a server crashes, the next server waits about 15 seconds to be sure the crashed one is gone, then takes the player. The player loses up to a second of inventory changes and up to a minute of everything else.
+
+With `sync_statistics` on, play time and distance walked only go out with the next real change or when the player leaves. A crash can lose that much of them.
+
+If a server falls behind on saves, it logs a warning once a player has waited more than 5 seconds.
+
+## Check the database's certificate
+
+`require_ssl = true` encrypts the connection, but it doesn't prove your server reached your real database. On a private network that's fine. Over the internet or a shared cloud network, someone in between could pretend to be your database, read the password and change characters.
+
+To prevent that, give each server the certificate of the authority that signed your database's certificate, as a PEM file:
 
 ```toml
 ssl_root_cert = "config/postgres-ca.crt"
 ```
 
-The database's certificate must name the address you put in `host`. A relative path starts from the server's folder.
-
-On Windows, write the path with forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file, and the server then refuses to start. With this set, the server refuses to connect to anything that can't prove it is your database.
-
-## How it works
-
-Think of the database row as the one real copy of the player, and each server as borrowing it.
-
-1. A player joins a server. That server borrows the player's row and copies the character into its normal save file. Minecraft loads the player from that file as usual.
-2. While the player plays, the server writes their character back to the database. It does this about a second after the inventory changes, once a minute, and when they respawn or leave. It skips a save that matches the last one it sent, so an idle player's timed save sends no data. On a server too busy to keep up, the wait grows, and the server logs a warning once a player has waited more than 5 seconds.
-3. The player switches servers. The old server writes their character one last time and hands the row back. The new server waits for that, then borrows the row.
-
-Only one server can borrow a player at a time, so two servers can never overwrite each other. If a server crashes, the next server waits about 15 seconds to make sure the crashed one is gone, then takes the player. They lose up to a second of inventory changes and up to a minute of everything else.
+The database's certificate must name the address in `host`. A relative path starts from the server folder. On Windows, use forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file.
 
 ## For mod developers
 
-Most mods work with no changes. NeoPlayerSync moves your mod's player attachments and persistent data with the player. It leaves behind anything you store in a world save (`SavedData`) or under your own key in the player file. To make that data travel, keep it in a player attachment.
+Most mods need no changes. NeoPlayerSync moves your player attachments and persistent data with the player. It leaves behind anything in a world save (`SavedData`) or under your own key in the player file. To make data travel, keep it in a player attachment.
 
 Two cases need a few lines from you.
 
 ### Save important changes right away
 
-NeoPlayerSync uploads the player every time the server saves them and something changed, and the regular save comes once a minute. When a player earns something they must not lose to a crash, like an unlock or a rare reward, save them at once:
+The regular save comes once a minute. When a player earns something they must not lose to a crash, like an unlock or a rare reward, save them at once:
 
 ```java
 player.level().getServer().getPlayerList().getPlayerIo().save(player);
 ```
 
-NeoPlayerSync sends that save to the database within milliseconds. This is plain Minecraft code, so your mod needs no dependency on NeoPlayerSync, and it also protects players on a single server.
+NeoPlayerSync uploads that save within milliseconds. This is plain Minecraft code, so you need no dependency on NeoPlayerSync, and it protects single-server players too.
 
 ### Fix timers stored as game ticks
 
-Say you store a cooldown as "ends at game tick 5,000,600". Each server counts game ticks from its own start, so that number means nothing on the next server. The player might wait hours, or skip the cooldown.
+Say you store a cooldown as "ends at game tick 5,000,600". Each server counts ticks from its own start, so that number means nothing on the next server. The player might wait hours or skip the cooldown.
 
 When NeoPlayerSync loads a player from the database, it tells you how old the save is. During `PlayerEvent.LoadFromFile`, the player's persistent data holds a compound named `neoplayersync:restored`:
 
@@ -123,7 +143,7 @@ When NeoPlayerSync loads a player from the database, it tells you how old the sa
 | `saved_game_time` | the old server's game tick when it saved the player |
 | `elapsed_millis` | real time since that save, in milliseconds |
 
-Move your deadlines onto this server's clock:
+Shift your deadlines onto this server's clock:
 
 ```java
 @SubscribeEvent
@@ -138,13 +158,11 @@ public static void onLoad(PlayerEvent.LoadFromFile event) {
 }
 ```
 
-A few rules:
+- Listen at normal priority. NeoPlayerSync adds the tag at `HIGHEST` and removes it at `LOWEST`.
+- The tag appears at most once per join. A player's first load gets no tag.
+- Read the tag; don't remove it. Other mods may need it.
 
-- Use the normal event priority. NeoPlayerSync adds the tag at `HIGHEST` and removes it at `LOWEST`.
-- The tag shows up at most once per join. A player loading for the first time gets no tag, and their timers stay as they are.
-- Read the tag, don't remove it. Other mods may need it too.
-
-You need no dependency on NeoPlayerSync. Without it, the tag never appears and your listener does nothing.
+Without NeoPlayerSync installed, the tag never appears and your listener does nothing.
 
 ## Building
 
@@ -154,9 +172,9 @@ You need Java 25. On Windows:
 .\tools\run-gradle.ps1 build
 ```
 
-The script uses `JAVA_HOME`, or a JDK you unpack into `tools/java25`. It builds the jar into `build/libs`, and that one jar runs on 26.1.2, 26.2 and 26.3.
+The script uses `JAVA_HOME`, or a JDK unpacked into `tools/java25`. The jar lands in `build/libs` and runs on 26.1.2, 26.2 and 26.3.
 
-Some tests need a real database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
+Some tests need a database. Unpack the PostgreSQL Windows binaries so that `tools/postgres/pgsql/bin` exists, then:
 
 ```powershell
 .\tools\test-postgres.ps1 start
@@ -165,13 +183,13 @@ Some tests need a real database. Unpack the PostgreSQL Windows binaries so that 
 .\tools\test-postgres.ps1 stop
 ```
 
-The tests run on 26.1.2. Add `-Pmc=26.2` or `-Pmc=26.3` to run them on a newer version. Keep the quotes, or PowerShell splits the version at the dot:
+`test-postgres.ps1` runs a throwaway database on `127.0.0.1:5433`. Without it, the database tests skip themselves.
+
+Tests run on 26.1.2. To test a newer line, add `-Pmc=26.2` or `-Pmc=26.3`. Keep the quotes, or PowerShell splits the version at the dot:
 
 ```powershell
 .\tools\run-gradle.ps1 runGameTestServer '-Pmc=26.3' --project-prop=includeGameTests=true
 ```
-
-The script runs a throwaway database on `127.0.0.1:5433`. Without it, the database tests skip themselves.
 
 ## License
 

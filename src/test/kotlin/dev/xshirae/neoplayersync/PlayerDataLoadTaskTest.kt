@@ -1,5 +1,7 @@
 package dev.xshirae.neoplayersync
 
+import com.google.gson.JsonElement
+import com.google.gson.JsonParser
 import net.minecraft.SharedConstants
 import net.minecraft.core.RegistryAccess
 import net.minecraft.core.registries.BuiltInRegistries
@@ -10,6 +12,7 @@ import net.minecraft.nbt.NbtIo
 import net.minecraft.nbt.NbtUtils
 import net.minecraft.nbt.Tag
 import net.minecraft.network.chat.Component
+import net.minecraft.server.level.ServerPlayer
 import net.minecraft.util.datafix.DataFixers
 import java.io.ByteArrayOutputStream
 import java.nio.file.Files
@@ -89,10 +92,25 @@ class PlayerDataLoadTaskTest {
         CompoundTag().apply { values.forEach { (key, value) -> putInt(key, value) } },
     )
 
-    private fun storeCharacter(data: ByteArray) {
+    private fun storeCharacter(data: ByteArray, extras: String = PlayerDataStore.NO_EXTRAS) {
         val session = UUID.randomUUID()
         store.claim(player, session, "earlier server")
-        executor.submit { store.saveAndRelease(player, session, data, savedTick = 100L) }.get()
+        executor.submit { store.saveAndRelease(player, session, data, savedTick = 100L, extras = extras) }.get()
+    }
+
+    /** Records what it is given, and fails instead when [fails] is set. */
+    private class RecordingExtra(override val id: String, private val fails: Boolean = false) : PlayerExtra {
+        override val tracksChanges = false
+        val restored = mutableListOf<JsonElement>()
+
+        override fun restore(playerId: UUID, stored: JsonElement) {
+            check(!fails) { "restore failed" }
+            restored += stored
+        }
+
+        override fun export(player: ServerPlayer, unloaded: JsonElement?): ExtraExport = error("not used here")
+
+        override fun unloadedAtJoin(stored: JsonElement): JsonElement? = error("not used here")
     }
 
     private fun readLocal(): CompoundTag = NbtIo.readCompressed(localFile, NbtAccounter.unlimitedHeap())
@@ -100,7 +118,7 @@ class PlayerDataLoadTaskTest {
     @Volatile
     private var admittedClaim: PlayerClaim? = null
 
-    private fun join(client: FakeClient, waitMillis: Long = 10_000L, staleMillis: Long = 300L) {
+    private fun join(client: FakeClient, waitMillis: Long = 10_000L, staleMillis: Long = 300L, extras: List<PlayerExtra> = emptyList()) {
         PlayerDataLoadTask(
             playerId = player,
             client = client,
@@ -113,6 +131,7 @@ class PlayerDataLoadTaskTest {
             waitMillis = waitMillis,
             staleMillis = staleMillis,
             onAdmitted = { _, claim -> admittedClaim = claim },
+            extras = extras,
         ).run(Consumer { })
         assertTrue(client.finished.await(30, TimeUnit.SECONDS), "The join step never finished")
         executor.submit { }.get()
@@ -237,6 +256,26 @@ class PlayerDataLoadTaskTest {
     @Test
     fun `an attachment from a mod this server lacks refuses the player`() {
         assertRefusedForMissingMod(saveWith("neoforge:attachments", CompoundTag().apply { put("missingmod:chakra", CompoundTag()) }))
+    }
+
+    @Test
+    fun `each synced extra gets its stored entry and an unsynced one is left alone`() {
+        storeCharacter(bytesOf(currentSave("XpLevel" to 30)), extras = """{"advancements":{"a":1},"statistics":{"s":1}}""")
+        val advancements = RecordingExtra("advancements")
+        val client = FakeClient()
+        join(client, extras = listOf(advancements))
+        assertTrue(client.admitted)
+        assertEquals(listOf<JsonElement>(JsonParser.parseString("""{"a":1}""")), advancements.restored)
+        assertEquals(1, assertNotNull(admittedClaim).extras.getAsJsonObject("statistics").get("s").asInt)
+    }
+
+    @Test
+    fun `an extra that fails to restore refuses the player and releases the row`() {
+        storeCharacter(bytesOf(currentSave("XpLevel" to 30)), extras = """{"advancements":{"a":1}}""")
+        val client = FakeClient()
+        join(client, extras = listOf(RecordingExtra("advancements", fails = true)))
+        assertEquals(PlayerDataLoadTask.LOAD_FAILED, client.refusedWith)
+        assertEquals(0, ownerCount(), "the row must be released")
     }
 
     @Test

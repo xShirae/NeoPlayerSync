@@ -1,5 +1,6 @@
 package dev.xshirae.neoplayersync
 
+import com.google.gson.JsonObject
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.network.chat.Component
 import net.minecraft.server.MinecraftServer
@@ -12,7 +13,9 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
@@ -24,12 +27,18 @@ internal class PlayerDataSession(
     val connected: () -> Boolean,
     /** The stored character, until [PlayerDataService.onLoaded] tells other mods how old it is. */
     var unshiftedSave: SavedPlayer?,
+    /** Per synced [PlayerExtra]: only what this server could not load, which every export must keep. */
+    val unloadedExtras: JsonObject,
+    /** Ids of change-tracking kinds with a change not yet exported. */
+    val changedExtras: MutableSet<String>,
 ) {
     /** When the claim returned, so time spent finishing the join also counts against cooldowns. */
     val claimedAtNanos: Long = System.nanoTime()
     var inWorld = false
     var closing = false
     var inventoryChanged = false
+    /** Counts saves handed to the writer, so a caller can tell whether vanilla's save went through. */
+    var uploads = 0
 }
 
 /** Everything that exists only while a dedicated server is using Postgres. Each store belongs to one thread. */
@@ -40,20 +49,27 @@ internal class PlayerDataService(
     private val serverName: String,
     /** Server-thread time each tick may spend on queued inventory saves. One save always runs, so the queue keeps moving. */
     private val inventorySaveBudgetNanos: Long = INVENTORY_SAVE_BUDGET_NANOS,
+    /** The kinds of data outside the player file that this server syncs. */
+    private val extras: List<PlayerExtra> = emptyList(),
 ) {
     private val claimThread = singleThread("NeoPlayerSync claims")
     private val writeThread = singleThread("NeoPlayerSync saves")
-    private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::onClaimLost)
+    private val extrasById = extras.associateBy { it.id }
+    private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::comparableExtras, ::onClaimLost)
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
     /** Players waiting for an inventory save, oldest first, with when each started waiting. */
     private val inventorySaves = LinkedHashMap<UUID, Long>()
     private val urgentSaves = LinkedHashSet<UUID>()
     private var lastBacklogWarningNanos: Long? = null
+    private var ping: CompletableFuture<Long>? = null
 
     val inventorySavesWaiting: Int get() = inventorySaves.size
+    val heldPlayers: Int get() = sessions.size
+    val unsentSaves: Int get() = writer.sessionsWithUnsentWrites().size
 
     init {
-        claimThread.scheduleWithFixedDelay(::renewLeases, HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS)
+        val heartbeatMillis = LeaseTiming.HEARTBEAT.inWholeMilliseconds
+        claimThread.scheduleWithFixedDelay(::renewLeases, heartbeatMillis, heartbeatMillis, TimeUnit.MILLISECONDS)
     }
 
     fun registerLoadTask(event: RegisterConfigurationTasksEvent) {
@@ -71,13 +87,25 @@ internal class PlayerDataService(
                 registries = server.registryAccess(),
                 serverName = serverName,
                 onAdmitted = { sessionId, claim -> addSession(playerId, sessionId, claim) { client.connected } },
+                extras = extras,
             ),
         )
     }
 
     /** Takes the whole claim, so no caller can drop the stored save that [onLoaded] reports. */
     fun addSession(playerId: UUID, sessionId: UUID, claim: PlayerClaim? = null, connected: () -> Boolean) {
-        sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved)
+        val stored = claim?.extras ?: JsonObject()
+        val unloaded = JsonObject()
+        // Kinds this server does not sync stay out of memory; the database keeps them untouched.
+        for (extra in extras) stored.get(extra.id)?.let(extra::unloadedAtJoin)?.let { unloaded.add(extra.id, it) }
+        // A tracked kind with nothing stored yet uploads with the first save.
+        val changed = extras.filter { it.tracksChanges && !stored.has(it.id) }.mapTo(HashSet()) { it.id }
+        sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved, unloaded, changed)
+    }
+
+    /** A change-tracking [PlayerExtra] of [player] changed, so their next save exports it. */
+    fun onExtraChanged(player: ServerPlayer, id: String) {
+        sessions[player.uuid]?.changedExtras?.add(id)
     }
 
     /**
@@ -131,8 +159,37 @@ internal class PlayerDataService(
             return
         }
         session.inventoryChanged = false
-        writer.submit(PlayerWrite(session.playerId, session.sessionId, data, server.overworld().gameTime, session.closing))
+        val extras = (event.entity as? ServerPlayer)?.let { exportExtras(it, session) } ?: JsonObject()
+        session.uploads++
+        writer.submit(
+            PlayerWrite(session.playerId, session.sessionId, data, server.overworld().gameTime, session.closing, extras = extras),
+        )
         if (session.closing) sessions.remove(session.playerId, session)
+    }
+
+    /**
+     * A kind left out of the result keeps its stored copy: an unchanged tracked kind, or one that failed to export,
+     * which then stays marked as changed so the next save tries again.
+     */
+    private fun exportExtras(player: ServerPlayer, session: PlayerDataSession): JsonObject {
+        val exported = JsonObject()
+        for (extra in extras) {
+            if (extra.tracksChanges && extra.id !in session.changedExtras) continue
+            try {
+                val export = extra.export(player, session.unloadedExtras.get(extra.id))
+                if (export.unloaded != null) session.unloadedExtras.add(extra.id, export.unloaded) else session.unloadedExtras.remove(extra.id)
+                session.changedExtras -= extra.id
+                exported.add(extra.id, export.entry)
+            } catch (exception: Exception) {
+                NeoPlayerSync.LOGGER.error("Could not save the {} of {}", extra.id, session.playerId, exception)
+            }
+        }
+        return exported
+    }
+
+    /** Writer thread. Each entry as its [PlayerExtra.comparable] sees it. */
+    private fun comparableExtras(exported: JsonObject): JsonObject = JsonObject().apply {
+        for ((id, entry) in exported.entrySet()) add(id, extrasById[id]?.comparable(entry) ?: entry)
     }
 
     fun onTick(tick: Long) {
@@ -161,6 +218,43 @@ internal class PlayerDataService(
     /** Spreads each player's minute-long timer over its own tick, so the timed saves don't all land at once. */
     internal fun isTimedSaveTick(playerId: UUID, tick: Long): Boolean =
         Math.floorMod(tick + playerId.hashCode(), TIMED_SAVE_TICKS) == 0L
+
+    /**
+     * Times one query on the claim thread, which owns [claimStore]. Completes with the round trip in milliseconds.
+     * Callers share a query that is still running, so repeated checks during an outage never queue up ahead of
+     * heartbeats and joins. Only the server thread calls this.
+     */
+    fun pingDatabase(): CompletableFuture<Long> {
+        val running = ping?.takeUnless { it.isDone } ?: CompletableFuture.supplyAsync({
+            val start = System.nanoTime()
+            claimStore.ping()
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
+        }, claimThread).also { ping = it }
+        // The timeout goes on a copy, so the shared query counts as running until the claim thread really finishes it.
+        return running.copy().orTimeout(COMMAND_WAIT_SECONDS, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Saves every player in the world now, then waits off the server thread until those saves reach the database.
+     * Completes with the number of players saved, or fails if any save failed or is still waiting after [COMMAND_WAIT_SECONDS].
+     */
+    fun saveAllNow(): CompletableFuture<Int> {
+        val sent = HashSet<UUID>()
+        var failed = 0
+        for (session in sessions.values) {
+            if (!session.inWorld || session.closing) continue
+            val before = session.uploads
+            savePlayer(session.playerId)
+            if (session.uploads == before) failed++ else sent += session.sessionId
+        }
+        return CompletableFuture.supplyAsync({
+            check(writer.awaitSent(TimeUnit.SECONDS.toMillis(COMMAND_WAIT_SECONDS)) { it in sent }) {
+                "Saves were still waiting for the database after $COMMAND_WAIT_SECONDS seconds. The writer keeps retrying them."
+            }
+            check(failed == 0) { "$failed players could not be saved on this server. See the server log." }
+            sent.size
+        }, Executor { Thread(it, "NeoPlayerSync /nps sync").apply { isDaemon = true }.start() })
+    }
 
     /** Waits for every save, which may block the stopping server thread for up to [STOP_WAIT_SECONDS]. */
     fun stop() {
@@ -240,7 +334,7 @@ internal class PlayerDataService(
         try {
             claimStore.heartbeat(sessions.values.mapTo(HashSet()) { it.sessionId } + writer.sessionsWithUnsentWrites())
         } catch (exception: Exception) {
-            // Another server takes over after the lease goes 12 seconds without renewal, and saves keep working until then.
+            // Another server takes over once the lease goes LeaseTiming.STALE without renewal, and saves keep working until then.
             NeoPlayerSync.LOGGER.warn("Could not renew player data leases", exception)
         }
     }
@@ -273,8 +367,8 @@ internal class PlayerDataService(
     }
 
     private companion object {
-        const val HEARTBEAT_SECONDS = 5L
         const val STOP_WAIT_SECONDS = 20L
+        const val COMMAND_WAIT_SECONDS = 20L
         const val CHECK_INTERVAL_TICKS = 20L
         const val TIMED_SAVE_TICKS = 1_200L
 
