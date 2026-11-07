@@ -175,6 +175,8 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
                 lease_until    timestamptz
             )
             """.trimIndent(),
+            // The heartbeat looks players up by session. Only held players are indexed, so it stays the size of the online count.
+            "CREATE INDEX neoplayersync_player_owner ON neoplayersync_player (owner_session) WHERE owner_session IS NOT NULL",
         )
 
         private const val CLAIM = """

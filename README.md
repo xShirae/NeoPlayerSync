@@ -27,6 +27,8 @@ Players don't install anything. The proxy doesn't need the mod either.
 
 Run the same Minecraft version on every server of a network. A server refuses to load a character that a newer version saved.
 
+Update NeoPlayerSync on every server together, too. The first updated server can upgrade the database tables, and after that an older NeoPlayerSync refuses to start. Servers that are already running keep working.
+
 ## Setup
 
 **1. Make a database.** In PostgreSQL, create an empty database and a user who owns it:

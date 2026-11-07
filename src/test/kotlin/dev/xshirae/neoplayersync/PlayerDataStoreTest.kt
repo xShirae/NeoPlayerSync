@@ -48,9 +48,24 @@ class PlayerDataStoreTest {
     fun `setup on a current database changes nothing`() {
         store.claim(player, sessionA, "a")
         store.prepareTables()
-        assertEquals(1, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
+        assertEquals(2, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
         assertEquals(1, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_schema"))
         assertEquals(1, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player"))
+    }
+
+    @Test
+    fun `setup upgrades layout 1 to layout 2 and keeps the players`() {
+        assertNotNull(store.claim(player, sessionA, "a"))
+        sql("DROP INDEX $SCHEMA.neoplayersync_player_owner")
+        sql("UPDATE $SCHEMA.neoplayersync_schema SET version = 1")
+
+        store.prepareTables()
+        assertEquals(2, intQuery("SELECT version FROM $SCHEMA.neoplayersync_schema"))
+        assertEquals(
+            1,
+            intQuery("SELECT count(*) FROM pg_indexes WHERE schemaname = '$SCHEMA' AND indexname = 'neoplayersync_player_owner'"),
+        )
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L), "the claim made before the upgrade should still hold")
     }
 
     @Test
