@@ -171,4 +171,4 @@ The script runs a throwaway database on `127.0.0.1:5433`. Without it, the databa
 
 ## License
 
-[Apache License 2.0](LICENSE)
+NeoPlayerSync is free software under the [GNU General Public License, version 2](LICENSE) or, at your option, any later version (`GPL-2.0-or-later`).
