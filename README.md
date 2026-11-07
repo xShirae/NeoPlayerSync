@@ -50,6 +50,7 @@ database = "minecraft"
 user = "minecraft"
 password = "pick-a-strong-password"
 require_ssl = true       # set false only if the database runs on the same machine
+ssl_root_cert = ""       # see "Check the database's certificate" below
 server_name = "lobby"    # any name; the database shows it as the player's current server
 ```
 
@@ -66,6 +67,20 @@ If a server can't reach the database, it refuses to start rather than letting pl
 The config file holds your database password. Keep it out of modpacks you share. NeoForge never sends it to players.
 
 You can turn the mod on for a network that already has players. Each player's current character goes into the database the first time a server saves them.
+
+### Check the database's certificate
+
+`require_ssl = true` encrypts the connection, but it doesn't prove your server reached your database. On a private network that's fine. If your servers reach the database over the internet or a shared cloud network, someone in between could pose as the database, read the password and change characters.
+
+To stop that, give each server the certificate of the authority that signed your database's certificate, as a PEM file:
+
+```toml
+ssl_root_cert = "config/postgres-ca.crt"
+```
+
+The database's certificate must name the address you put in `host`. A relative path starts from the server's folder.
+
+On Windows, write the path with forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file, and NeoForge then replaces it with a fresh one where `enabled = false`, so your server would start without the database. With this set, the server refuses to connect to anything that can't prove it is your database.
 
 ## How it works
 

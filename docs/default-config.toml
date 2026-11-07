@@ -14,5 +14,7 @@ user = "minecraft"
 password = ""
 #Refuse a connection that is not encrypted. Turn this off only if the database is on this machine.
 require_ssl = true
+#Path to the certificate of the authority that signed the database's certificate. Set it to make sure this server talks to your real database. Blank encrypts without that check. Needs require_ssl = true. On Windows, use forward slashes, like C:/certs/ca.crt.
+ssl_root_cert = ""
 #Name shown in the database as the player's current server. Blank uses this server's port.
 server_name = ""

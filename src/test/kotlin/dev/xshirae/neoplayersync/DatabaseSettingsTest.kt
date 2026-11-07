@@ -1,9 +1,12 @@
 package dev.xshirae.neoplayersync
 
+import kotlin.io.path.createTempFile
+import kotlin.io.path.deleteIfExists
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DatabaseSettingsTest {
@@ -13,8 +16,19 @@ class DatabaseSettingsTest {
         database: String = "minecraft",
         user: String = "minecraft",
         password: String = "secret-value",
+        requireSsl: Boolean = true,
         serverName: String = "",
-    ) = DatabaseSettings.validated(host, port, database, user, password, requireSsl = true, serverName = serverName)
+        sslRootCert: String = "",
+    ) = DatabaseSettings.validated(
+        host = host,
+        port = port,
+        database = database,
+        user = user,
+        password = password,
+        requireSsl = requireSsl,
+        serverName = serverName,
+        sslRootCert = sslRootCert,
+    )
 
     @Test
     fun `valid settings are accepted`() {
@@ -45,6 +59,42 @@ class DatabaseSettingsTest {
     @Test
     fun `the server name is trimmed`() {
         assertEquals("na1", settings(serverName = "  na1 ").serverName)
+    }
+
+    @Test
+    fun `without a root certificate the connection is encrypted but unchecked`() {
+        val properties = settings().connectionProperties()
+        assertEquals("require", properties.getProperty("sslmode"))
+        assertNull(properties.getProperty("sslrootcert"))
+        assertEquals("prefer", settings(requireSsl = false).connectionProperties().getProperty("sslmode"))
+    }
+
+    @Test
+    fun `a root certificate makes the driver check the server's certificate and host name`() {
+        val cert = createTempFile("neoplayersync-ca", ".crt")
+        try {
+            val properties = settings(sslRootCert = "  $cert ").connectionProperties()
+            assertEquals("verify-full", properties.getProperty("sslmode"))
+            assertEquals(cert.toString(), properties.getProperty("sslrootcert"))
+        } finally {
+            cert.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun `a root certificate that is missing or has encryption off is rejected`() {
+        val missing = assertFailsWith<IllegalArgumentException> { settings(sslRootCert = "no/such/ca.crt") }.message.orEmpty()
+        assertTrue("ssl_root_cert" in missing, missing)
+
+        val cert = createTempFile("neoplayersync-ca", ".crt")
+        try {
+            val plain = assertFailsWith<IllegalArgumentException> {
+                settings(requireSsl = false, sslRootCert = cert.toString())
+            }.message.orEmpty()
+            assertTrue("require_ssl" in plain, plain)
+        } finally {
+            cert.deleteIfExists()
+        }
     }
 
     /** Runs on each loader the build targets, so a renamed config type fails here rather than leaking the password. */

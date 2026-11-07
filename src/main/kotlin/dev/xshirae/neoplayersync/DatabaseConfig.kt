@@ -1,6 +1,9 @@
 package dev.xshirae.neoplayersync
 
 import net.neoforged.neoforge.common.ModConfigSpec
+import java.nio.file.Files
+import java.nio.file.InvalidPathException
+import java.nio.file.Path
 import java.sql.Connection
 import java.sql.Driver
 import java.util.Properties
@@ -30,6 +33,9 @@ internal object DatabaseConfig {
     private val requireSsl = builder
         .comment("Refuse a connection that is not encrypted. Turn this off only if the database is on this machine.")
         .define("require_ssl", true)
+    private val sslRootCert = builder
+        .comment("Path to the certificate of the authority that signed the database's certificate. Set it to make sure this server talks to your real database. Blank encrypts without that check. Needs require_ssl = true. On Windows, use forward slashes, like C:/certs/ca.crt.")
+        .define("ssl_root_cert", "")
     private val serverName = builder
         .comment("Name shown in the database as the player's current server. Blank uses this server's port.")
         .define("server_name", "")
@@ -45,6 +51,7 @@ internal object DatabaseConfig {
         user = user.get(),
         password = password.get(),
         requireSsl = requireSsl.get(),
+        sslRootCert = sslRootCert.get(),
         serverName = serverName.get(),
     )
 }
@@ -57,22 +64,34 @@ internal class DatabaseSettings private constructor(
     private val user: String,
     private val password: String,
     private val requireSsl: Boolean,
+    /** Null encrypts without checking the server's certificate. */
+    private val sslRootCert: Path?,
     val serverName: String,
 ) {
     fun connect(): Connection {
-        val properties = Properties().apply {
-            setProperty("user", user)
-            setProperty("password", password)
-            setProperty("sslmode", if (requireSsl) "require" else "prefer")
-            setProperty("connectTimeout", CONNECT_TIMEOUT_SECONDS)
-            setProperty("socketTimeout", SOCKET_TIMEOUT_SECONDS)
-            setProperty("ApplicationName", "NeoPlayerSync")
-        }
         // The interface type avoids org.postgresql.Driver's signature, which names an annotation missing from the compile path.
         val driver: Driver = org.postgresql.Driver()
-        return checkNotNull(driver.connect("jdbc:postgresql://$host:$port/$database", properties)) {
+        return checkNotNull(driver.connect("jdbc:postgresql://$host:$port/$database", connectionProperties())) {
             "The Postgres driver rejected the connection URL."
         }
+    }
+
+    internal fun connectionProperties(): Properties = Properties().apply {
+        setProperty("user", user)
+        setProperty("password", password)
+        setProperty(
+            "sslmode",
+            when {
+                // verify-full also checks that the certificate names this host, so another trusted server cannot stand in.
+                sslRootCert != null -> "verify-full"
+                requireSsl -> "require"
+                else -> "prefer"
+            },
+        )
+        sslRootCert?.let { setProperty("sslrootcert", it.toString()) }
+        setProperty("connectTimeout", CONNECT_TIMEOUT_SECONDS)
+        setProperty("socketTimeout", SOCKET_TIMEOUT_SECONDS)
+        setProperty("ApplicationName", "NeoPlayerSync")
     }
 
     companion object {
@@ -88,16 +107,27 @@ internal class DatabaseSettings private constructor(
             password: String,
             requireSsl: Boolean,
             serverName: String,
+            sslRootCert: String = "",
         ): DatabaseSettings {
+            val certPath = sslRootCert.trim().takeIf { it.isNotEmpty() }
+            val cert = certPath?.let {
+                try {
+                    Path.of(it)
+                } catch (_: InvalidPathException) {
+                    null
+                }
+            }
             val problems = buildList {
                 if (!URL_SAFE.matches(host)) add("host must be an address, such as 127.0.0.1")
                 if (port !in 1..65_535) add("port must be between 1 and 65535")
                 if (!URL_SAFE.matches(database)) add("database must be a plain database name")
                 if (user.isBlank()) add("user is required")
                 if (password.isBlank()) add("password is required")
+                if (certPath != null && (cert == null || !Files.isRegularFile(cert))) add("ssl_root_cert must be the path of a file: $certPath")
+                if (certPath != null && !requireSsl) add("ssl_root_cert needs require_ssl = true")
             }
             require(problems.isEmpty()) { "Invalid ${NeoPlayerSync.CONFIG_FILE}: ${problems.joinToString("; ")}" }
-            return DatabaseSettings(host, port, database, user, password, requireSsl, serverName.trim())
+            return DatabaseSettings(host, port, database, user, password, requireSsl, cert, serverName.trim())
         }
     }
 }
