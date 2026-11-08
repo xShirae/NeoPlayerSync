@@ -77,7 +77,7 @@ A server with `enabled = false` keeps its own separate copy of each player and n
 
 ## When a server won't start
 
-A server refuses to start if it can't reach the database, so players never load an old copy of their character. It also refuses if `config/neoplayersync.toml` is broken. NeoForge replaces a broken file with defaults, which turn sync off, and saves yours as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back.
+A server refuses to start if it can't reach the database, so players never load an old copy of their character. It also refuses if `config/neoplayersync.toml` is broken, even if it broke while the server ran. NeoForge then swaps in defaults, which turn sync off, and saves your file as `config/neoplayersync-1.toml.bak`. Fix that copy and put it back, or delete it if you meant to turn sync off.
 
 ## Commands
 

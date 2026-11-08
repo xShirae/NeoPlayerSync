@@ -20,13 +20,7 @@ object PlayerDataSync {
 
     @SubscribeEvent
     fun onServerAboutToStart(event: ServerAboutToStartEvent) {
-        DatabaseConfig.unreadableFileError?.let {
-            error(
-                "config/${NeoPlayerSync.CONFIG_FILE} is not valid TOML ($it). NeoForge replaced it with defaults, which turn " +
-                    "sync off, and saved your file as config/neoplayersync-1.toml.bak. Fix that file, copy it back to " +
-                    "config/${NeoPlayerSync.CONFIG_FILE} and start the server again.",
-            )
-        }
+        DatabaseConfig.startupProblem?.let { error(it) }
         if (!DatabaseConfig.enabled()) return
         val server = event.server
         if (!server.isDedicatedServer) {

@@ -1,5 +1,6 @@
 package dev.xshirae.neoplayersync
 
+import com.electronwill.nightconfig.core.CommentedConfig
 import com.electronwill.nightconfig.core.io.ParsingException
 import com.electronwill.nightconfig.toml.TomlParser
 import net.neoforged.neoforge.common.ModConfigSpec
@@ -10,6 +11,7 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.Driver
 import java.util.Properties
+import kotlin.math.abs
 
 /** [NeoPlayerSync] registers this as a LOCAL config, because it holds the database password. */
 internal object DatabaseConfig {
@@ -55,21 +57,59 @@ internal object DatabaseConfig {
 
     val SPEC: ModConfigSpec = builder.build()
 
-    /** Why the operator's file failed to parse, or null. NeoForge replaces such a file with defaults, which turns sync off. */
-    var unreadableFileError: String? = null
+    /** Why the server must not start with the operator's file, or null. */
+    var startupProblem: String? = null
 
-    /** Reads [file] the way NeoForge does. Call it before NeoForge loads the file, which then still holds the operator's text. */
-    fun tomlError(file: Path): String? {
+    /**
+     * Checks [file] the way NeoForge reads it. Call it before NeoForge loads the file, which then still holds the
+     * operator's text. NeoForge replaces a file that does not parse with defaults, which turn sync off. Its file watcher
+     * does the same while the server runs, so a later start finds defaults next to a broken backup written with them.
+     */
+    fun fileProblem(file: Path): String? {
         if (!Files.exists(file)) return null
-        return try {
-            Files.newBufferedReader(file).use { TomlParser().parse(it) }
-            null
-        } catch (e: IOException) {
-            e.toString()
-        } catch (e: ParsingException) {
-            e.message ?: e.toString()
+        val name = file.fileName.toString()
+        val parsed = parse(file).getOrElse { e ->
+            return unparsable(name, if (e is ParsingException) e.message ?: e.toString() else e.toString())
+        }
+        if (parsed.get<Any?>("enabled") == true) return null
+        val backup = brokenBackupWrittenWith(file) ?: return null
+        return "NeoForge replaced config/$name with defaults, which turn sync off, because it was not valid TOML. " +
+            "Your file is saved as config/$backup. Fix that file, copy it back to config/$name and start the server " +
+            "again. If you meant to turn sync off, delete config/$backup."
+    }
+
+    private fun parse(file: Path): Result<CommentedConfig> = try {
+        Result.success(Files.newBufferedReader(file).use { TomlParser().parse(it) })
+    } catch (e: IOException) {
+        Result.failure(e)
+    } catch (e: ParsingException) {
+        Result.failure(e)
+    }
+
+    private fun unparsable(name: String, reason: String) =
+        "config/$name is not valid TOML ($reason). NeoForge replaced it with defaults, which turn sync off, and saved " +
+            "your file as config/${name.removeSuffix(".toml")}-1.toml.bak. Fix that file, copy it back to config/$name " +
+            "and start the server again."
+
+    /**
+     * The name of a NeoForge backup of [file] saved within seconds of it that does not parse, which marks [file] as
+     * NeoForge's defaults. NeoForge also backs up a valid file when it only adds a missing key; that backup parses.
+     */
+    private fun brokenBackupWrittenWith(file: Path): String? {
+        val written = Files.getLastModifiedTime(file).toMillis()
+        val pattern = Regex(Regex.escape(file.fileName.toString().removeSuffix(".toml")) + """-\d+\.toml\.bak""")
+        return Files.list(file.parent).use { siblings ->
+            siblings.filter { pattern.matches(it.fileName.toString()) }
+                .filter { abs(Files.getLastModifiedTime(it).toMillis() - written) <= REPLACED_WITHIN_MILLIS }
+                .filter { parse(it).isFailure }
+                .findFirst()
+                .map { it.fileName.toString() }
+                .orElse(null)
         }
     }
+
+    // NeoForge writes the backup and then the defaults; on the test network they landed one second apart.
+    private const val REPLACED_WITHIN_MILLIS = 10_000L
 
     fun enabled(): Boolean = enabled.get()
 

@@ -12,7 +12,7 @@ import org.slf4j.Logger
 class NeoPlayerSync(modBus: IEventBus, modContainer: ModContainer) {
     init {
         // NeoForge opens this config type after mod construction, so the file is still the operator's own.
-        DatabaseConfig.unreadableFileError = DatabaseConfig.tomlError(FMLPaths.CONFIGDIR.get().resolve(CONFIG_FILE))
+        DatabaseConfig.startupProblem = DatabaseConfig.fileProblem(FMLPaths.CONFIGDIR.get().resolve(CONFIG_FILE))
         modContainer.registerConfig(localConfigType(), DatabaseConfig.SPEC, CONFIG_FILE)
         modBus.addListener(PlayerDataSync::registerLoadTask)
     }
