@@ -1,12 +1,18 @@
 package dev.xshirae.neoplayersync
 
 import com.google.gson.JsonObject
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
+import java.sql.Connection
+import java.sql.PreparedStatement
 import java.sql.SQLException
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.random.Random
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -215,7 +221,75 @@ class PlayerDataWriterTest {
         }
     }
 
+    /**
+     * A full server stopping, as vanilla's stopServer does it: saveAll queues a save for everyone, then removeAll kicks
+     * them, which queues the final save and release. PlayerDataService.stop then waits up to 20 seconds for the writer.
+     */
+    @Test
+    fun `one connection drains a full server's final saves within the stop wait`() {
+        val test = checkNotNull(database)
+        val random = Random(1)
+        val players = List(SHUTDOWN_PLAYERS) { UUID.randomUUID() to UUID.randomUUID() }
+        for ((playerId, sessionId) in players) checkNotNull(checks.claim(playerId, sessionId, "test"))
+
+        val slow = PlayerDataStore { withLatency(test.newConnectionForTest(), ROUND_TRIP_MILLIS) }
+        val shutdownExecutor = ScheduledThreadPoolExecutor(1)
+        val stopping = PlayerDataWriter(slow, shutdownExecutor) { _, sessionId -> lost += sessionId }
+        try {
+            val start = System.nanoTime()
+            for ((playerId, sessionId) in players) stopping.submit(PlayerWrite(playerId, sessionId, random.nextBytes(SAVE_BYTES), 1L, false))
+            for ((playerId, sessionId) in players) stopping.submit(PlayerWrite(playerId, sessionId, random.nextBytes(SAVE_BYTES), 2L, true))
+            assertTrue(stopping.awaitIdle(STOP_WAIT_MILLIS), "unsent after the stop wait: ${stopping.sessionsWithUnsentWrites().size} players")
+            println("Drained $SHUTDOWN_PLAYERS final saves at $ROUND_TRIP_MILLIS ms per round trip in ${(System.nanoTime() - start) / 1_000_000} ms")
+
+            assertTrue(lost.isEmpty())
+            assertEquals(
+                SHUTDOWN_PLAYERS,
+                test.intQuery(
+                    "SELECT count(*) FROM $SCHEMA.neoplayersync_player " +
+                        "WHERE owner_session IS NULL AND saved_tick = 2 AND length(data) = $SAVE_BYTES",
+                ),
+                "every player should hold their final save and be free to join elsewhere",
+            )
+        } finally {
+            shutdownExecutor.submit { slow.close() }.get()
+            shutdownExecutor.shutdown()
+        }
+    }
+
+    /** Adds [millis] before every statement runs, like a database on another machine. */
+    private fun withLatency(connection: Connection, millis: Long): Connection =
+        proxy(connection) { result -> if (result is PreparedStatement) delayed(result, millis) else result }
+
+    private fun delayed(statement: PreparedStatement, millis: Long): PreparedStatement = proxy(statement, before = { method ->
+        if (method.name.startsWith("execute")) Thread.sleep(millis)
+    }) { it }
+
+    private inline fun <reified T : Any> proxy(
+        target: T,
+        crossinline before: (Method) -> Unit = {},
+        crossinline wrap: (Any?) -> Any?,
+    ): T = Proxy.newProxyInstance(T::class.java.classLoader, arrayOf(T::class.java)) { _, method, args ->
+        before(method)
+        try {
+            wrap(method.invoke(target, *(args ?: emptyArray())))
+        } catch (exception: InvocationTargetException) {
+            // The store must see the driver's SQLException, not the reflection wrapper.
+            throw exception.targetException
+        }
+    } as T
+
     private companion object {
         const val SCHEMA = "neoplayersync_writer_test"
+        const val SHUTDOWN_PLAYERS = 500
+
+        /** Compressed NBT does not compress further, so random bytes stand in for a heavily modded player's save. */
+        const val SAVE_BYTES = 64 * 1024
+
+        /** A database in the same region but not on the same machine. */
+        const val ROUND_TRIP_MILLIS = 10L
+
+        /** PlayerDataService.STOP_WAIT_SECONDS. */
+        const val STOP_WAIT_MILLIS = 20_000L
     }
 }
