@@ -54,7 +54,8 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
     /**
      * Returns null while another session holds this player. This takes over an expired lease only when it still equals
      * [staleLease], a value from [leaseOf] that the caller watched stay unchanged. After a database outage every lease
-     * has expired while holders may still have saves waiting, so expiry proves nothing.
+     * has expired while holders may still have saves waiting, so expiry proves nothing. A session that already holds
+     * the player claims it again, so a retry after a claim whose reply was lost gets the row back at once.
      */
     fun claim(playerId: UUID, sessionId: UUID, serverName: String, staleLease: Long? = null): PlayerClaim? = withConnection { connection ->
         connection.prepareStatement(CLAIM).use { statement ->
@@ -219,6 +220,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
             ON CONFLICT (player_id) DO UPDATE
                 SET owner_session = EXCLUDED.owner_session, owner_server = EXCLUDED.owner_server, lease_until = EXCLUDED.lease_until
                 WHERE neoplayersync_player.owner_session IS NULL
+                    OR neoplayersync_player.owner_session = EXCLUDED.owner_session
                     OR (neoplayersync_player.lease_until < now() AND ${LEASE_MICROS} = ?)
             RETURNING schema_version, data, saved_tick, (extract(epoch FROM now() - saved_at) * 1000)::bigint, extra::text
         """

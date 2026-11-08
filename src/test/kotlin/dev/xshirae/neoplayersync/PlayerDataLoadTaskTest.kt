@@ -17,10 +17,14 @@ import net.minecraft.util.datafix.DataFixers
 import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.Connection
+import java.sql.SQLException
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Consumer
 import kotlin.concurrent.thread
 import kotlin.io.path.exists
@@ -118,7 +122,13 @@ class PlayerDataLoadTaskTest {
     @Volatile
     private var admittedClaim: PlayerClaim? = null
 
-    private fun join(client: FakeClient, waitMillis: Long = 10_000L, staleMillis: Long = 300L, extras: List<PlayerExtra> = emptyList()) {
+    private fun join(
+        client: FakeClient,
+        waitMillis: Long = 10_000L,
+        staleMillis: Long = 300L,
+        extras: List<PlayerExtra> = emptyList(),
+        store: PlayerDataStore = this.store,
+    ) {
         PlayerDataLoadTask(
             playerId = player,
             client = client,
@@ -130,7 +140,7 @@ class PlayerDataLoadTaskTest {
             serverName = "test",
             waitMillis = waitMillis,
             staleMillis = staleMillis,
-            onAdmitted = { _, claim -> admittedClaim = claim },
+            onAdmitted = { _, claim, _ -> admittedClaim = claim },
             extras = extras,
         ).run(Consumer { })
         assertTrue(client.finished.await(30, TimeUnit.SECONDS), "The join step never finished")
@@ -352,6 +362,67 @@ class PlayerDataLoadTaskTest {
         join(client, waitMillis = 5_000L, staleMillis = 1_000L)
         lastRenewal.join()
         assertTrue(client.admitted, "the watch must follow the renewal, or the stopped server keeps the player forever")
+    }
+
+    /** Fails to connect [failures] times, then reaches the test database. */
+    private fun flakyStore(failures: Int): PlayerDataStore {
+        val left = AtomicInteger(failures)
+        return PlayerDataStore {
+            if (left.getAndDecrement() > 0) throw SQLException("the database is restarting")
+            checkNotNull(database).newConnectionForTest()
+        }
+    }
+
+    @Test
+    fun `a claim that fails is tried again while the wait lasts`() {
+        val flaky = flakyStore(failures = 2)
+        val client = FakeClient()
+        join(client, store = flaky)
+        executor.submit { flaky.close() }.get()
+        assertTrue(client.admitted, "a short outage must not refuse the player")
+        assertEquals(1, ownerCount())
+    }
+
+    @Test
+    fun `time the database was away does not count toward taking over a lease`() {
+        val holder = UUID.randomUUID()
+        store.claim(player, holder, "old server")
+        sql("UPDATE $SCHEMA.neoplayersync_player SET lease_until = now() - interval '1 minute'")
+        val down = AtomicBoolean(false)
+        val opened = mutableListOf<Connection>()
+        val joining = PlayerDataStore {
+            if (down.get()) throw SQLException("the database is down")
+            checkNotNull(database).newConnectionForTest().also { synchronized(opened) { opened += it } }
+        }
+        val outage = thread {
+            // The join has seen the lease once by now.
+            Thread.sleep(300L)
+            down.set(true)
+            synchronized(opened) { opened.forEach { it.close() } }
+            // Longer than the stale window, while the old server cannot renew or send its waiting save either.
+            Thread.sleep(2_000L)
+            down.set(false)
+            checkNotNull(database).newStore().use { oldStore ->
+                Thread.sleep(400L)
+                oldStore.heartbeat(listOf(holder))
+                Thread.sleep(400L)
+                check(oldStore.saveAndRelease(player, holder, bytesOf(currentSave("XpLevel" to 7)), savedTick = 55L))
+            }
+        }
+        val client = FakeClient()
+        join(client, waitMillis = 8_000L, staleMillis = 1_500L, store = joining)
+        outage.join()
+        executor.submit { joining.close() }.get()
+        assertTrue(client.admitted)
+        assertEquals(55L, admittedClaim?.saved?.savedTick, "the join must wait for the save that was held up by the outage")
+    }
+
+    @Test
+    fun `a claim that keeps failing refuses the player once the wait is over`() {
+        val client = FakeClient()
+        join(client, waitMillis = 600L, store = flakyStore(failures = Int.MAX_VALUE))
+        assertEquals(PlayerDataLoadTask.LOAD_FAILED, client.refusedWith)
+        assertEquals(0, ownerCount())
     }
 
     @Test

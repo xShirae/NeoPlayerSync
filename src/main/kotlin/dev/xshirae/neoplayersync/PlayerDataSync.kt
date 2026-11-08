@@ -35,6 +35,7 @@ object PlayerDataSync {
             server = server,
             claimStore = claimStore,
             writeStore = PlayerDataStore(settings::connect),
+            leaseStore = PlayerDataStore(settings::connect),
             serverName = settings.serverName.ifEmpty { server.port.toString() },
             extras = buildList {
                 if (DatabaseConfig.syncAdvancements()) add(PlayerExtras.advancements(server))

@@ -31,6 +31,8 @@ internal class PlayerDataSession(
     val unloadedExtras: JsonObject,
     /** Ids of change-tracking kinds with a change not yet exported. */
     val changedExtras: MutableSet<String>,
+    /** The attachment types of the stored character, until [PlayerDataService.onLoaded] checks that each one loaded. */
+    var storedAttachments: Set<String>,
 ) {
     /** When the claim returned, so time spent finishing the join also counts against cooldowns. */
     val claimedAtNanos: Long = System.nanoTime()
@@ -46,6 +48,8 @@ internal class PlayerDataService(
     private val server: MinecraftServer,
     private val claimStore: PlayerDataStore,
     private val writeStore: PlayerDataStore,
+    /** Renews leases on a thread of its own, so a burst of joins on the claim thread cannot hold renewals back. */
+    private val leaseStore: PlayerDataStore,
     private val serverName: String,
     /** Server-thread time each tick may spend on queued inventory saves. One save always runs, so the queue keeps moving. */
     private val inventorySaveBudgetNanos: Long = INVENTORY_SAVE_BUDGET_NANOS,
@@ -54,12 +58,15 @@ internal class PlayerDataService(
 ) {
     private val claimThread = singleThread("NeoPlayerSync claims")
     private val writeThread = singleThread("NeoPlayerSync saves")
+    private val leaseThread = singleThread("NeoPlayerSync leases")
     private val extrasById = extras.associateBy { it.id }
     private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::comparableExtras, ::onClaimLost)
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
     /** Players waiting for an inventory save, oldest first, with when each started waiting. */
     private val inventorySaves = LinkedHashMap<UUID, Long>()
     private val urgentSaves = LinkedHashSet<UUID>()
+    /** Players refused while vanilla placed them, who are disconnected at the end of the tick. */
+    private val refusedAtLoad = HashSet<UUID>()
     private var lastBacklogWarningNanos: Long? = null
     private var ping: CompletableFuture<Long>? = null
 
@@ -69,7 +76,9 @@ internal class PlayerDataService(
 
     init {
         val heartbeatMillis = LeaseTiming.HEARTBEAT.inWholeMilliseconds
-        claimThread.scheduleWithFixedDelay(::renewLeases, heartbeatMillis, heartbeatMillis, TimeUnit.MILLISECONDS)
+        leaseThread.scheduleWithFixedDelay(::renewLeases, heartbeatMillis, heartbeatMillis, TimeUnit.MILLISECONDS)
+        keepAlive(claimThread, claimStore)
+        keepAlive(writeThread, writeStore)
     }
 
     fun registerLoadTask(event: RegisterConfigurationTasksEvent) {
@@ -86,21 +95,29 @@ internal class PlayerDataService(
                 fixer = server.fixerUpper,
                 registries = server.registryAccess(),
                 serverName = serverName,
-                onAdmitted = { sessionId, claim -> addSession(playerId, sessionId, claim) { client.connected } },
+                onAdmitted = { sessionId, claim, storedAttachments ->
+                    addSession(playerId, sessionId, claim, storedAttachments) { client.connected }
+                },
                 extras = extras,
             ),
         )
     }
 
     /** Takes the whole claim, so no caller can drop the stored save that [onLoaded] reports. */
-    fun addSession(playerId: UUID, sessionId: UUID, claim: PlayerClaim? = null, connected: () -> Boolean) {
+    fun addSession(
+        playerId: UUID,
+        sessionId: UUID,
+        claim: PlayerClaim? = null,
+        storedAttachments: Set<String> = emptySet(),
+        connected: () -> Boolean,
+    ) {
         val stored = claim?.extras ?: JsonObject()
         val unloaded = JsonObject()
         // Kinds this server does not sync stay out of memory; the database keeps them untouched.
         for (extra in extras) stored.get(extra.id)?.let(extra::unloadedAtJoin)?.let { unloaded.add(extra.id, it) }
         // A tracked kind with nothing stored yet uploads with the first save.
         val changed = extras.filter { it.tracksChanges && !stored.has(it.id) }.mapTo(HashSet()) { it.id }
-        sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved, unloaded, changed)
+        sessions[playerId] = PlayerDataSession(playerId, sessionId, connected, claim?.saved, unloaded, changed, storedAttachments)
     }
 
     /** A change-tracking [PlayerExtra] of [player] changed, so their next save exports it. */
@@ -114,6 +131,13 @@ internal class PlayerDataService(
      */
     fun onLoaded(player: ServerPlayer) {
         val session = sessions[player.uuid] ?: return
+        val missing = PlayerDataMerge.missingAttachments(player, session.storedAttachments)
+        // Only the first load follows the restore. A later one may come after a mod removed its own attachment.
+        session.storedAttachments = emptySet()
+        if (missing.isNotEmpty()) {
+            refuseLoaded(session, missing)
+            return
+        }
         val saved = session.unshiftedSave ?: return
         session.unshiftedSave = null
         val sinceClaimMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - session.claimedAtNanos)
@@ -121,6 +145,21 @@ internal class PlayerDataService(
             putLong(NeoPlayerSync.SAVED_GAME_TIME, saved.savedTick)
             putLong(NeoPlayerSync.ELAPSED_MILLIS, saved.elapsedMillis + sinceClaimMillis)
         })
+    }
+
+    /**
+     * The player loaded without parts of their stored character, so this server stops acting for them before any save
+     * can upload the loss. Vanilla is still placing them, which a disconnect must not interrupt, so that waits for [onTick].
+     */
+    private fun refuseLoaded(session: PlayerDataSession, missing: List<String>) {
+        NeoPlayerSync.LOGGER.warn(
+            "Refused {}: this server could not load the stored attachments {}. Check that every server runs the same version of the mods that own them.",
+            session.playerId,
+            missing,
+        )
+        sessions.remove(session.playerId, session)
+        giveUpClaim(session)
+        refusedAtLoad += session.playerId
     }
 
     fun onLoggedIn(player: ServerPlayer) {
@@ -213,6 +252,14 @@ internal class PlayerDataService(
             if (System.nanoTime() - deadline >= 0L) break
         }
         releaseFailedLogouts()
+        disconnectRefused()
+    }
+
+    private fun disconnectRefused() {
+        if (refusedAtLoad.isEmpty()) return
+        val refused = refusedAtLoad.toList()
+        refusedAtLoad.clear()
+        for (playerId in refused) server.playerList.getPlayer(playerId)?.connection?.disconnect(UNREADABLE_ATTACHMENT)
     }
 
     /** Spreads each player's minute-long timer over its own tick, so the timed saves don't all land at once. */
@@ -220,17 +267,17 @@ internal class PlayerDataService(
         Math.floorMod(tick + playerId.hashCode(), TIMED_SAVE_TICKS) == 0L
 
     /**
-     * Times one query on the claim thread, which owns [claimStore]. Completes with the round trip in milliseconds.
+     * Times one query on the lease thread, which owns [leaseStore]. Completes with the round trip in milliseconds.
      * Callers share a query that is still running, so repeated checks during an outage never queue up ahead of
-     * heartbeats and joins. Only the server thread calls this.
+     * heartbeats. Only the server thread calls this.
      */
     fun pingDatabase(): CompletableFuture<Long> {
         val running = ping?.takeUnless { it.isDone } ?: CompletableFuture.supplyAsync({
             val start = System.nanoTime()
-            claimStore.ping()
+            leaseStore.ping()
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
-        }, claimThread).also { ping = it }
-        // The timeout goes on a copy, so the shared query counts as running until the claim thread really finishes it.
+        }, leaseThread).also { ping = it }
+        // The timeout goes on a copy, so the shared query counts as running until the lease thread really finishes it.
         return running.copy().orTimeout(COMMAND_WAIT_SECONDS, TimeUnit.SECONDS)
     }
 
@@ -268,6 +315,7 @@ internal class PlayerDataService(
         }
         shutDown(claimThread, claimStore)
         shutDown(writeThread, writeStore)
+        shutDown(leaseThread, leaseStore)
     }
 
     private fun checkEverySecond() {
@@ -332,7 +380,9 @@ internal class PlayerDataService(
 
     private fun renewLeases() {
         try {
-            claimStore.heartbeat(sessions.values.mapTo(HashSet()) { it.sessionId } + writer.sessionsWithUnsentWrites())
+            val held = sessions.values.mapTo(HashSet()) { it.sessionId } + writer.sessionsWithUnsentWrites()
+            // With nobody held, a ping keeps the connection in use, so the first renewal after a quiet spell finds it alive.
+            if (held.isEmpty()) leaseStore.ping() else leaseStore.heartbeat(held)
         } catch (exception: Exception) {
             // Another server takes over once the lease goes LeaseTiming.STALE without renewal, and saves keep working until then.
             NeoPlayerSync.LOGGER.warn("Could not renew player data leases", exception)
@@ -348,6 +398,21 @@ internal class PlayerDataService(
             sessions.remove(playerId, session)
             server.playerList.getPlayer(playerId)?.connection?.disconnect(CLAIM_LOST)
         }
+    }
+
+    /**
+     * Firewalls and cloud load balancers drop a connection that stays idle for a few minutes, often without telling
+     * either end. The next query then hangs until the driver's socket timeout, so an idle connection gets a ping instead.
+     */
+    private fun keepAlive(executor: ScheduledThreadPoolExecutor, store: PlayerDataStore) {
+        executor.scheduleWithFixedDelay({
+            try {
+                store.ping()
+            } catch (exception: Exception) {
+                // The store reconnects on its next use.
+                NeoPlayerSync.LOGGER.debug("NeoPlayerSync keep-alive ping failed", exception)
+            }
+        }, KEEP_ALIVE_SECONDS, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS)
     }
 
     private fun shutDown(executor: ScheduledThreadPoolExecutor, store: PlayerDataStore) {
@@ -372,11 +437,17 @@ internal class PlayerDataService(
         const val CHECK_INTERVAL_TICKS = 20L
         const val TIMED_SAVE_TICKS = 1_200L
 
+        /** Well under the shortest common idle cutoff, about four minutes on cloud load balancers. */
+        const val KEEP_ALIVE_SECONDS = 60L
+
         /** Each save runs on the server thread, so a burst of changes waits rather than causing lag. 3 ms is 6% of a tick. */
         val INVENTORY_SAVE_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(3L)
         val BACKLOG_WARNING_NANOS = TimeUnit.SECONDS.toNanos(5L)
         val BACKLOG_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1L)
 
         val CLAIM_LOST: Component = Component.literal("Your character moved to another server.")
+        val UNREADABLE_ATTACHMENT: Component = Component.literal(
+            "Your character has data this server's mods can't read, perhaps from a newer mod version. Your data is safe; please join another server.",
+        )
     }
 }

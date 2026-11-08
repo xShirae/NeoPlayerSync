@@ -68,7 +68,8 @@ internal class PlayerDataLoadTask(
     private val serverName: String,
     private val waitMillis: Long = LeaseTiming.WAIT.inWholeMilliseconds,
     private val staleMillis: Long = LeaseTiming.STALE.inWholeMilliseconds,
-    private val onAdmitted: (sessionId: UUID, claim: PlayerClaim) -> Unit = { _, _ -> },
+    /** [storedAttachments] names the attachment types in the stored character, which vanilla must load in full. */
+    private val onAdmitted: (sessionId: UUID, claim: PlayerClaim, storedAttachments: Set<String>) -> Unit = { _, _, _ -> },
     private val extras: List<PlayerExtra> = emptyList(),
 ) : ICustomConfigurationTask {
     private val sessionId: UUID = UUID.randomUUID()
@@ -76,6 +77,7 @@ internal class PlayerDataLoadTask(
     // Only attemptClaim uses these, and it runs on the single claims thread.
     private var watchedLease: Long? = null
     private var watchedSinceNanos = 0L
+    private var failedBefore = false
 
     override fun type(): ConfigurationTask.Type = TYPE
 
@@ -89,8 +91,17 @@ internal class PlayerDataLoadTask(
         val claim = try {
             store.claim(playerId, sessionId, serverName, staleLease()).also { if (it == null) watch(store.leaseOf(playerId)) }
         } catch (exception: Exception) {
-            NeoPlayerSync.LOGGER.error("Could not claim player data for {}", playerId, exception)
-            client.refuse(LOAD_FAILED)
+            // A dropped connection or a database restart often clears within the wait, and the store reconnects on the next try.
+            if (System.nanoTime() - deadline >= 0L) {
+                NeoPlayerSync.LOGGER.error("Could not claim player data for {}", playerId, exception)
+                client.refuse(LOAD_FAILED)
+            } else {
+                if (!failedBefore) NeoPlayerSync.LOGGER.warn("Could not claim player data for {}. Retrying.", playerId, exception)
+                failedBefore = true
+                // The holder could not renew while the database was away either, so the watch starts over once it is back.
+                watchedLease = null
+                tryAgain(deadline)
+            }
             return
         }
         when {
@@ -99,8 +110,12 @@ internal class PlayerDataLoadTask(
                 NeoPlayerSync.LOGGER.warn("Player {} is still held by another server after {} ms", playerId, waitMillis)
                 client.refuse(STILL_HELD)
             }
-            else -> executor.schedule({ attemptClaim(deadline) }, POLL_MILLIS, TimeUnit.MILLISECONDS)
+            else -> tryAgain(deadline)
         }
+    }
+
+    private fun tryAgain(deadline: Long) {
+        executor.schedule({ attemptClaim(deadline) }, POLL_MILLIS, TimeUnit.MILLISECONDS)
     }
 
     /** The holder's lease once it has gone [staleMillis] without a renewal, which only a stopped server fails to do. */
@@ -114,13 +129,14 @@ internal class PlayerDataLoadTask(
     }
 
     private fun restore(claim: PlayerClaim) {
-        try {
+        val storedAttachments = try {
             check(claim.schemaVersion <= PlayerDataStore.PLAYER_DATA_SCHEMA) {
                 "Player data schema ${claim.schemaVersion} is newer than this build's ${PlayerDataStore.PLAYER_DATA_SCHEMA}"
             }
-            claim.saved?.let { writeLocalFile(it.data) }
+            val attachments = claim.saved?.let { writeLocalFile(it.data) }.orEmpty()
             // A kind with nothing stored yet keeps this server's own copy, which the first save then uploads.
             for (extra in extras) claim.extras.get(extra.id)?.let { extra.restore(playerId, it) }
+            attachments
         } catch (exception: UnreadableCharacter) {
             NeoPlayerSync.LOGGER.warn("Refused {}: {}", playerId, exception.message)
             release()
@@ -133,12 +149,13 @@ internal class PlayerDataLoadTask(
             return
         }
         client.admit(
-            beforeContinuing = { onAdmitted(sessionId, claim) },
+            beforeContinuing = { onAdmitted(sessionId, claim, storedAttachments) },
             ifGone = { executor.execute { release() } },
         )
     }
 
-    private fun writeLocalFile(data: ByteArray) {
+    /** Returns the attachment types of the stored character. */
+    private fun writeLocalFile(data: ByteArray): Set<String> {
         val stored = PlayerDataMerge.upgrade(PlayerDataMerge.readSave(data), fixer)
         val unreadable = PlayerDataMerge.unreadableParts(stored, registries)
         if (unreadable.isNotEmpty()) throw UnreadableCharacter(unreadable)
@@ -155,6 +172,7 @@ internal class PlayerDataLoadTask(
         } finally {
             Files.deleteIfExists(temporary)
         }
+        return PlayerDataMerge.storedAttachments(stored)
     }
 
     /** Any problem with the local file only costs this server's position, because the character comes from the database. */

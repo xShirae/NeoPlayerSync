@@ -10,11 +10,13 @@ import net.minecraft.nbt.NbtIo
 import net.minecraft.nbt.NbtOps
 import net.minecraft.nbt.NbtUtils
 import net.minecraft.nbt.Tag
+import net.minecraft.resources.Identifier
 import net.minecraft.util.datafix.DataFixTypes
 import net.minecraft.world.ItemStackWithSlot
 import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.entity.ai.attributes.AttributeInstance
 import net.minecraft.world.item.ItemStack
+import net.neoforged.neoforge.attachment.IAttachmentHolder
 import net.neoforged.neoforge.registries.NeoForgeRegistries
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -95,6 +97,18 @@ internal object PlayerDataMerge {
         val known = NeoForgeRegistries.ATTACHMENT_TYPES.keySet().mapTo(HashSet()) { it.toString() }
         save.getCompoundOrEmpty(ATTACHMENTS).keySet().filterNot(known::contains).forEach { problems += "$ATTACHMENTS: unknown type $it" }
         return problems
+    }
+
+    /** The attachment types an upgraded [save] holds. */
+    fun storedAttachments(save: CompoundTag): Set<String> = save.getCompoundOrEmpty(ATTACHMENTS).keySet().toSet()
+
+    /**
+     * Each of [stored] that [player] lacks right after loading. NeoForge logs an attachment it cannot read and skips it,
+     * for example one written by a newer version of its mod, and the next save would upload the character without it.
+     */
+    fun missingAttachments(player: IAttachmentHolder, stored: Set<String>): List<String> = stored.filter { key ->
+        val type = Identifier.tryParse(key)?.let(NeoForgeRegistries.ATTACHMENT_TYPES::getValue)
+        type == null || !player.hasData(type)
     }
 
     /** Upgrade both tags first. The merge drops a travelling key that [stored] lacks, such as an effect that ended. */

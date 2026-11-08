@@ -10,12 +10,14 @@ import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.server.network.CommonListenerCookie
 import net.minecraft.stats.Stats
+import net.minecraft.util.ProblemReporter
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.inventory.AbstractContainerMenu
 import net.minecraft.world.inventory.ContainerListener
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
+import net.minecraft.world.level.storage.TagValueInput
 import net.neoforged.neoforge.event.EventHooks
 import org.opentest4j.TestAbortedException
 import java.nio.file.Files
@@ -121,6 +123,7 @@ object PlayerDataSyncGameTests {
             helper.level.server,
             database.newStore(),
             writeStore(database),
+            database.newStore(),
             "test",
             inventorySaveBudgetNanos,
             extras(helper.level.server),
@@ -491,6 +494,50 @@ object PlayerDataSyncGameTests {
         helper.assertTrue(seen.size == 1, "A second load event must not repeat the tag, saw ${seen.size}")
         finish()
         helper.succeed()
+    }
+
+    /**
+     * Claims a player and loads them the way vanilla does, from their own save with the test attachment stored as
+     * [attachment]. Returns the player once the load event has run.
+     */
+    private fun Fixture.loadWithAttachment(name: String, attachment: CompoundTag): ServerPlayer {
+        val player = TestPlayers.survival(helper, name)
+        val session = UUID.randomUUID()
+        checkNotNull(checks.claim(player.uuid, session, "test"))
+        val stored = player.saveEntityForTest().apply {
+            put("neoforge:attachments", CompoundTag().apply { put("${NeoPlayerSync.MOD_ID}:test_attachment", attachment) })
+        }
+        service.addSession(player.uuid, session, storedAttachments = PlayerDataMerge.storedAttachments(stored)) { true }
+        player.load(TagValueInput.create(ProblemReporter.DISCARDING, helper.level.registryAccess(), stored))
+        EventHooks.firePlayerLoadingEvent(player, helper.level.server.playerList, player.stringUUID)
+        return player
+    }
+
+    /** NeoForge skips an attachment it cannot read, and the next save would erase it on every server. */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-attachment-unreadable")
+    fun anAttachmentThatFailsToLoadRefusesThePlayerAndStoresNothing(helper: GameTestHelper) = withDatabase(helper) {
+        // As if a newer version of the owning mod wrote a shape this one's codec rejects.
+        val player = loadWithAttachment("attach-bad", CompoundTag().apply { putString("value", "a newer format") })
+        service.onTick(1L)
+        save(player)
+        finishWhen("The player should be disconnected, the row freed and nothing stored") {
+            (!player.connection.connection.isConnected && ownedCount(player) == 0 && savedCount(player) == 0).also { done ->
+                if (done) helper.level.server.playerList.remove(player)
+            }
+        }
+    }
+
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-attachment-loaded")
+    fun anAttachmentThatLoadsKeepsThePlayer(helper: GameTestHelper) = withDatabase(helper) {
+        val player = loadWithAttachment("attach-ok", CompoundTag().apply { putInt("value", 4_000) })
+        service.onTick(1L)
+        helper.assertTrue(player.getData(SyncGameTestRegistration.TEST_ATTACHMENT) == 4_000, "The attachment should have loaded")
+        helper.assertTrue(player.connection.connection.isConnected, "A player whose attachments loaded must stay")
+        helper.assertTrue(service.heldPlayers == 1, "This server should still hold the player")
+        helper.level.server.playerList.remove(player)
+        finishWhen("The final save should be stored") { savedCount(player) == 1 && ownedCount(player) == 0 }
     }
 
     private const val SCHEMA = "neoplayersync_sync_test"

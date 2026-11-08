@@ -111,6 +111,18 @@ class PlayerDataStoreTest {
     }
 
     @Test
+    fun `the session that holds a player gets it again with the stored data`() {
+        store.claim(player, sessionA, "a")
+        assertTrue(store.saveAndRelease(player, sessionA, saveBytes, savedTick = 500L))
+        assertNotNull(store.claim(player, sessionB, "b"))
+
+        // As if the first reply was lost and the joining server asks again.
+        val again = assertNotNull(store.claim(player, sessionB, "b"))
+        assertContentEquals(saveBytes, assertNotNull(again.saved).data)
+        assertNull(store.claim(player, sessionA, "a"))
+    }
+
+    @Test
     fun `only one of many servers wins a claim`() {
         val winners = inParallel(8) { index ->
             newStore().claim(player, UUID.randomUUID(), "server-$index")
