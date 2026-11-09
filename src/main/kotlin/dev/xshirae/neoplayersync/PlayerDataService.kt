@@ -349,15 +349,26 @@ internal class PlayerDataService(
         )
     }
 
+    /**
+     * Wear alone waits for the next timed or final save. A gliding elytra or a mining tool changes every few ticks, and
+     * saving each change would spend the inventory save budget on one player. A crash then costs at most a minute of wear.
+     */
     private fun watchInventory(player: ServerPlayer, session: PlayerDataSession) {
+        // Vanilla hands listeners a fresh copy of each changed stack and never changes it afterwards, so it can be kept as is.
+        val lastSeen = HashMap<Int, ItemStack>()
         player.inventoryMenu.addSlotListener(object : ContainerListener {
             override fun slotChanged(menu: AbstractContainerMenu, slot: Int, stack: ItemStack) {
-                session.inventoryChanged = true
+                val before = lastSeen.put(slot, stack)
+                if (before == null || !onlyWearChanged(before, stack)) session.inventoryChanged = true
             }
 
             override fun dataChanged(menu: AbstractContainerMenu, id: Int, value: Int) = Unit
         })
     }
+
+    /** Setting a component to the item's default drops it, so a repair back to full compares equal too. */
+    private fun onlyWearChanged(before: ItemStack, after: ItemStack): Boolean =
+        before.count == after.count && ItemStack.isSameItemSameComponents(before, after.copy().apply { damageValue = before.damageValue })
 
     private fun savePlayer(playerId: UUID) {
         val player = server.playerList.getPlayer(playerId) ?: return

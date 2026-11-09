@@ -2,7 +2,9 @@ package dev.xshirae.neoplayersync
 
 import com.mojang.authlib.GameProfile
 import net.minecraft.gametest.framework.GameTestHelper
+import net.minecraft.core.component.DataComponents
 import net.minecraft.nbt.CompoundTag
+import net.minecraft.network.chat.Component
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
 import net.minecraft.resources.Identifier
@@ -181,6 +183,32 @@ object PlayerDataSyncGameTests {
         finishWhen("The pickup should be stored") {
             (storedInventoryCount(player) == 1).also { if (it) helper.level.server.playerList.remove(player) }
         }
+    }
+
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-wear")
+    fun wearAloneWaitsForTheNextTimedSave(helper: GameTestHelper) = withDatabase(helper) {
+        val (player, _) = claimedPlayer("sync-wear")
+        val localSave = helper.level.server.playerList.playerIo.playerDir.toPath().resolve("${player.uuid}.dat")
+        val checkTicks = generateSequence(20L) { it + 20L }.filterNot { service.isTimedSaveTick(player.uuid, it) }.iterator()
+        fun savesAtNextCheck(what: String, expected: Boolean, change: () -> Unit) {
+            Files.deleteIfExists(localSave)
+            change()
+            player.inventoryMenu.broadcastChanges()
+            service.onTick(checkTicks.next())
+            helper.assertTrue(Files.exists(localSave) == expected, "$what should ${if (expected) "" else "not "}trigger a save")
+        }
+        val elytra = { player.getItemBySlot(EquipmentSlot.CHEST) }
+
+        savesAtNextCheck("Putting on an elytra", true) { player.setItemSlot(EquipmentSlot.CHEST, ItemStack(Items.ELYTRA)) }
+        savesAtNextCheck("Wear", false) { elytra().damageValue = 5 }
+        savesAtNextCheck("A repair back to full", false) { elytra().damageValue = 0 }
+        savesAtNextCheck("Renaming", true) { elytra().set(DataComponents.CUSTOM_NAME, Component.literal("Wings")) }
+        savesAtNextCheck("Breaking", true) { player.setItemSlot(EquipmentSlot.CHEST, ItemStack.EMPTY) }
+
+        helper.level.server.playerList.remove(player)
+        finish()
+        helper.succeed()
     }
 
     @JvmStatic
