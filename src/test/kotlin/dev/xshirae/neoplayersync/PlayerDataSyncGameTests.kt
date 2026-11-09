@@ -405,6 +405,47 @@ object PlayerDataSyncGameTests {
         }
     }
 
+    /**
+     * A renamed sword stands in for a mod's charge item: same item, same count, new data. The charge waits from the
+     * check before the pickup, so one shared first-come queue would save it first.
+     */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-item-data-last")
+    fun itemDataSavesWaitBehindRealInventoryChanges(helper: GameTestHelper) = withDatabase(helper) {
+        val charger = claimedPlayer("sync-charge").first
+        val blocker = claimedPlayer("sync-prio-block").first
+        val picker = claimedPlayer("sync-prio-pick").first
+        val players = listOf(charger, blocker, picker)
+        charger.setItemSlot(EquipmentSlot.MAINHAND, ItemStack(Items.IRON_SWORD))
+        players.forEach {
+            it.inventoryMenu.broadcastChanges()
+            save(it)
+            Files.delete(helper.level.server.playerList.playerIo.playerDir.toPath().resolve("${it.uuid}.dat"))
+        }
+        fun change(player: ServerPlayer, action: () -> Unit) {
+            action()
+            player.inventoryMenu.broadcastChanges()
+        }
+        val tick = generateSequence(20L) { it + 20L }.first { start ->
+            listOf(start, start + 20L, start + 21L).none { check -> players.any { service.isTimedSaveTick(it.uuid, check) } }
+        }
+
+        change(charger) { charger.mainHandItem.set(DataComponents.CUSTOM_NAME, Component.literal("Charge 1")) }
+        change(blocker) { blocker.inventory.add(ItemStack(Items.EMERALD)) }
+        service.onTick(tick)
+        helper.assertTrue(localSaveExists(blocker) && !localSaveExists(charger), "With room for one save, the real change should go first")
+
+        change(picker) { picker.inventory.add(ItemStack(Items.DIAMOND)) }
+        service.onTick(tick + 20L)
+        helper.assertTrue(localSaveExists(picker) && !localSaveExists(charger), "A later pickup should still save before the waiting charge")
+        service.onTick(tick + 21L)
+        helper.assertTrue(localSaveExists(charger), "The charge should save once nothing else waits")
+
+        players.forEach(helper.level.server.playerList::remove)
+        finish()
+        helper.succeed()
+    }
+
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-cap")
     fun inventorySavesWaitTheirTurnOnceTheBudgetIsSpent(helper: GameTestHelper) = withDatabase(helper) {

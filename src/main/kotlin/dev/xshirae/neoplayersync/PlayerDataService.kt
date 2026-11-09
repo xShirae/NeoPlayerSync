@@ -38,7 +38,10 @@ internal class PlayerDataSession(
     val claimedAtNanos: Long = System.nanoTime()
     var inWorld = false
     var closing = false
+    /** An item was gained, lost, moved or replaced, or a menu closed. */
     var inventoryChanged = false
+    /** Only data on an item changed, such as a mod's charge or energy. Never wear, which waits for the timed save. */
+    var itemDataChanged = false
     /** Counts saves handed to the writer, so a caller can tell whether vanilla's save went through. */
     var uploads = 0
 }
@@ -65,13 +68,15 @@ internal class PlayerDataService(
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
     /** Players waiting for an inventory save, oldest first, with when each started waiting. */
     private val inventorySaves = LinkedHashMap<UUID, Long>()
+    /** Like [inventorySaves] for [PlayerDataSession.itemDataChanged], which saves only once [inventorySaves] is empty. */
+    private val itemDataSaves = LinkedHashMap<UUID, Long>()
     private val urgentSaves = LinkedHashSet<UUID>()
     /** Players refused while vanilla placed them, who are disconnected at the end of the tick. */
     private val refusedAtLoad = HashSet<UUID>()
     private var lastBacklogWarningNanos: Long? = null
     private var ping: CompletableFuture<Long>? = null
 
-    val inventorySavesWaiting: Int get() = inventorySaves.size
+    val inventorySavesWaiting: Int get() = inventorySaves.size + itemDataSaves.size
     val heldPlayers: Int get() = sessions.size
     val unsentSaves: Int get() = writer.sessionsWithUnsentWrites().size
 
@@ -202,6 +207,7 @@ internal class PlayerDataService(
             return
         }
         session.inventoryChanged = false
+        session.itemDataChanged = false
         val extras = (event.entity as? ServerPlayer)?.let { exportExtras(it, session) } ?: JsonObject()
         session.uploads++
         writer.submit(
@@ -245,17 +251,10 @@ internal class PlayerDataService(
         }
         // An urgent save also covers the inventory, so a second save this tick would repeat the same work.
         inventorySaves.keys -= urgentSaves
+        itemDataSaves.keys -= urgentSaves
         urgentSaves.forEach(::savePlayer)
         urgentSaves.clear()
-
-        // A time budget rather than a count, so a light modpack saves many players per tick and a heavy one fewer.
-        val deadline = System.nanoTime() + inventorySaveBudgetNanos
-        val iterator = inventorySaves.keys.iterator()
-        while (iterator.hasNext()) {
-            savePlayer(iterator.next())
-            iterator.remove()
-            if (System.nanoTime() - deadline >= 0L) break
-        }
+        saveQueuedInventories()
         releaseFailedLogouts()
         disconnectRefused()
     }
@@ -324,6 +323,23 @@ internal class PlayerDataService(
         shutDown(leaseThread, leaseStore)
     }
 
+    /**
+     * A time budget rather than a count, so a light modpack saves many players per tick and a heavy one fewer. Item data
+     * goes last, so players whose charge items change every second never delay a pickup. If the budget never reaches
+     * them, the timed save does.
+     */
+    private fun saveQueuedInventories() {
+        val deadline = System.nanoTime() + inventorySaveBudgetNanos
+        for (queue in arrayOf(inventorySaves, itemDataSaves)) {
+            val iterator = queue.keys.iterator()
+            while (iterator.hasNext()) {
+                savePlayer(iterator.next())
+                iterator.remove()
+                if (System.nanoTime() - deadline >= 0L) return
+            }
+        }
+    }
+
     private fun checkEverySecond() {
         for (session in sessions.values) {
             when {
@@ -334,14 +350,23 @@ internal class PlayerDataService(
                 }
                 session.inventoryChanged -> {
                     session.inventoryChanged = false
-                    inventorySaves.putIfAbsent(session.playerId, System.nanoTime())
+                    session.itemDataChanged = false
+                    // A player already waiting for item data moves up and keeps the time they started waiting.
+                    inventorySaves.putIfAbsent(session.playerId, itemDataSaves.remove(session.playerId) ?: System.nanoTime())
+                }
+                session.itemDataChanged -> {
+                    session.itemDataChanged = false
+                    if (session.playerId !in inventorySaves) itemDataSaves.putIfAbsent(session.playerId, System.nanoTime())
                 }
             }
         }
         warnIfInventorySavesLag(System.nanoTime())
     }
 
-    /** A crash loses whatever is still queued, so a growing wait must reach the logs before it reaches players. */
+    /**
+     * A crash loses whatever is still queued, so a growing wait must reach the logs before it reaches players. Item data
+     * has no warning, because the timed save caps its wait at a minute.
+     */
     private fun warnIfInventorySavesLag(now: Long) {
         val oldest = inventorySaves.values.firstOrNull() ?: return
         if (now - oldest < BACKLOG_WARNING_NANOS) return
@@ -358,6 +383,7 @@ internal class PlayerDataService(
     /**
      * Wear alone waits for the next timed or final save. A gliding elytra or a mining tool changes every few ticks, and
      * saving each change would spend the inventory save budget on one player. A crash then costs at most a minute of wear.
+     * Other changes that keep the item and count, such as a mod's charge, queue behind real inventory changes.
      */
     private fun watchInventory(player: ServerPlayer, session: PlayerDataSession) {
         // Vanilla hands listeners a fresh copy of each changed stack and never changes it afterwards, so it can be kept as is.
@@ -365,7 +391,10 @@ internal class PlayerDataService(
         player.inventoryMenu.addSlotListener(object : ContainerListener {
             override fun slotChanged(menu: AbstractContainerMenu, slot: Int, stack: ItemStack) {
                 val before = lastSeen.put(slot, stack)
-                if (before == null || !onlyWearChanged(before, stack)) session.inventoryChanged = true
+                when {
+                    before == null || before.count != stack.count || !ItemStack.isSameItem(before, stack) -> session.inventoryChanged = true
+                    !onlyWearChanged(before, stack) -> session.itemDataChanged = true
+                }
             }
 
             override fun dataChanged(menu: AbstractContainerMenu, id: Int, value: Int) = Unit
