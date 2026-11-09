@@ -154,6 +154,27 @@ class PlayerDataStoreTest {
         assertEquals(1, extras.getAsJsonObject("statistics").get("s").asInt, "a kind the save did not carry must stay")
     }
 
+    /** Postgres keeps a large value outside the row and gives it a new storage ID whenever an update writes it again. */
+    @Test
+    fun `a save without extras leaves the stored ones unwritten`() {
+        store.claim(player, sessionA, "a")
+        // Random text does not compress, so it is stored outside the row.
+        val counters = (1..500).joinToString(",") { "\"k$it\":\"${UUID.randomUUID()}\"" }
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L, extras = """{"statistics":{$counters}}"""))
+        fun storageId() = intQuery("SELECT pg_column_toast_chunk_id(extra)::bigint::int FROM $SCHEMA.neoplayersync_player")
+        val stored = storageId()
+
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 2L))
+        assertTrue(store.saveAndRelease(player, sessionA, saveBytes, savedTick = 3L))
+        assertEquals(stored, storageId(), "saves without extras should leave the stored extras as they are")
+        assertEquals(3, intQuery("SELECT saved_tick FROM $SCHEMA.neoplayersync_player"))
+
+        assertNotNull(store.claim(player, sessionB, "b"))
+        assertTrue(store.save(player, sessionB, saveBytes, savedTick = 4L, extras = """{"advancements":{"a":1}}"""))
+        assertTrue(stored != storageId(), "a save with extras should write them")
+        assertEquals(500, intQuery("SELECT count(*) FROM jsonb_object_keys((SELECT extra -> 'statistics' FROM $SCHEMA.neoplayersync_player))"))
+    }
+
     @Test
     fun `a new player claims with no extras`() {
         assertEquals(0, assertNotNull(store.claim(player, sessionA, "a")).extras.size())

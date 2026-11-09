@@ -3,7 +3,6 @@ package dev.xshirae.neoplayersync
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.sql.Connection
-import java.sql.PreparedStatement
 import java.sql.SQLException
 import java.sql.Types
 import java.util.UUID
@@ -97,7 +96,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
         savedTick: Long,
         ageMillis: Long = 0L,
         extras: String = NO_EXTRAS,
-    ): Boolean = writeSave(SAVE, playerId, sessionId, data, savedTick, ageMillis, extras)
+    ): Boolean = writeSave(release = false, playerId, sessionId, data, savedTick, ageMillis, extras)
 
     /** Returns false if this session no longer owns the player. [ageMillis] and [extras] work as in [save]. */
     fun saveAndRelease(
@@ -107,7 +106,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
         savedTick: Long,
         ageMillis: Long = 0L,
         extras: String = NO_EXTRAS,
-    ): Boolean = writeSave(SAVE_AND_RELEASE, playerId, sessionId, data, savedTick, ageMillis, extras)
+    ): Boolean = writeSave(release = true, playerId, sessionId, data, savedTick, ageMillis, extras)
 
     /** Gives up the claim and keeps the stored data, for a player who never reached the world. */
     fun release(playerId: UUID, sessionId: UUID): Boolean = withConnection { connection ->
@@ -137,7 +136,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
     }
 
     private fun writeSave(
-        sql: String,
+        release: Boolean,
         playerId: UUID,
         sessionId: UUID,
         data: ByteArray,
@@ -146,21 +145,22 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
         extras: String,
     ): Boolean =
         withConnection { connection ->
+            // Assigning the column, even to a merge that adds nothing, makes Postgres compress and write the whole stored value again.
+            val mergeExtras = extras != NO_EXTRAS
+            val owner = if (release) "$CLEAR_OWNER " else "lease_until = $NEW_LEASE "
+            val sql = "UPDATE neoplayersync_player SET $WRITE_SAVE${if (mergeExtras) MERGE_EXTRAS else ""}, $owner$OWNED_BY_SESSION"
             connection.prepareStatement(sql).use { statement ->
-                statement.bindSave(data, savedTick, ageMillis, extras)
-                statement.setObject(6, playerId)
-                statement.setObject(7, sessionId)
+                var index = 0
+                statement.setBytes(++index, data)
+                statement.setLong(++index, savedTick)
+                statement.setDouble(++index, ageMillis.coerceAtLeast(0L) / 1_000.0)
+                statement.setInt(++index, PLAYER_DATA_SCHEMA)
+                if (mergeExtras) statement.setString(++index, extras)
+                statement.setObject(++index, playerId)
+                statement.setObject(++index, sessionId)
                 statement.executeUpdate() == 1
             }
         }
-
-    private fun PreparedStatement.bindSave(data: ByteArray, savedTick: Long, ageMillis: Long, extras: String) {
-        setBytes(1, data)
-        setLong(2, savedTick)
-        setDouble(3, ageMillis.coerceAtLeast(0L) / 1_000.0)
-        setInt(4, PLAYER_DATA_SCHEMA)
-        setString(5, extras)
-    }
 
     private fun Connection.execute(sql: String) {
         createStatement().use { it.execute(sql) }
@@ -187,9 +187,9 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
 
         private val NEW_LEASE = "now() + interval '${LeaseTiming.LEASE.inWholeMilliseconds} milliseconds'"
         const val NO_EXTRAS = "{}"
-        private const val WRITE_SAVE =
-            "data = ?, saved_tick = ?, saved_at = now() - make_interval(secs => ?), schema_version = ?, " +
-                "extra = coalesce(extra, '{}'::jsonb) || ?::jsonb"
+        private const val WRITE_SAVE = "data = ?, saved_tick = ?, saved_at = now() - make_interval(secs => ?), schema_version = ?"
+        private const val MERGE_EXTRAS = ", extra = coalesce(extra, '{}'::jsonb) || ?::jsonb"
+        private const val CLEAR_OWNER = "owner_session = NULL, owner_server = NULL, lease_until = NULL"
         private const val OWNED_BY_SESSION = "WHERE player_id = ? AND owner_session = ?"
         private const val LEASE_MICROS = "(extract(epoch FROM neoplayersync_player.lease_until) * 1000000)::bigint"
 
@@ -234,11 +234,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
             SELECT NULL, NULL, NULL, NULL, NULL, $LEASE_MICROS FROM neoplayersync_player
                 WHERE player_id = ? AND owner_session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM claimed)
         """
-        private val SAVE = "UPDATE neoplayersync_player SET $WRITE_SAVE, lease_until = $NEW_LEASE $OWNED_BY_SESSION"
-        private const val SAVE_AND_RELEASE =
-            "UPDATE neoplayersync_player SET $WRITE_SAVE, owner_session = NULL, owner_server = NULL, lease_until = NULL $OWNED_BY_SESSION"
-        private const val RELEASE =
-            "UPDATE neoplayersync_player SET owner_session = NULL, owner_server = NULL, lease_until = NULL $OWNED_BY_SESSION"
+        private const val RELEASE = "UPDATE neoplayersync_player SET $CLEAR_OWNER $OWNED_BY_SESSION"
         private val HEARTBEAT = "UPDATE neoplayersync_player SET lease_until = $NEW_LEASE WHERE owner_session = ANY(?)"
     }
 }
