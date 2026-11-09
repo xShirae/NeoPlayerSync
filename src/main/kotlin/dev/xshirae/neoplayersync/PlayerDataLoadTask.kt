@@ -89,7 +89,7 @@ internal class PlayerDataLoadTask(
     private fun attemptClaim(deadline: Long) {
         if (!client.connected) return
         val claim = try {
-            store.claim(playerId, sessionId, serverName, staleLease()).also { if (it == null) watch(store.leaseOf(playerId)) }
+            store.tryClaim(playerId, sessionId, serverName, staleLease()).also { if (it.claim == null) watch(it.heldLease) }.claim
         } catch (exception: Exception) {
             // A dropped connection or a database restart often clears within the wait, and the store reconnects on the next try.
             if (System.nanoTime() - deadline >= 0L) {

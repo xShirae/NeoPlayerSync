@@ -7,6 +7,8 @@ import net.minecraft.nbt.CompoundTag
 import net.minecraft.network.chat.Component
 import net.minecraft.nbt.NbtAccounter
 import net.minecraft.nbt.NbtIo
+import net.minecraft.nbt.NbtUtils
+import net.minecraft.core.registries.Registries
 import net.minecraft.resources.Identifier
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
@@ -19,15 +21,21 @@ import net.minecraft.world.inventory.AbstractContainerMenu
 import net.minecraft.world.inventory.ContainerListener
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
+import net.minecraft.world.item.component.ItemContainerContents
+import net.minecraft.world.item.enchantment.Enchantments
 import net.minecraft.world.level.storage.TagValueInput
 import net.neoforged.neoforge.event.EventHooks
 import org.opentest4j.TestAbortedException
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.sql.SQLException
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.function.Consumer
 
 /**
  * Real players, real vanilla saves and the real database. Each test has its own batch, because they share the one active
@@ -105,6 +113,15 @@ object PlayerDataSyncGameTests {
         }
     }
 
+    /** The test database, or null after passing the test unchecked because test Postgres is not running. */
+    private fun openDatabaseOrSkip(helper: GameTestHelper): PlayerDataTestDatabase? = try {
+        PlayerDataTestDatabase(SCHEMA)
+    } catch (_: TestAbortedException) {
+        NeoPlayerSync.LOGGER.warn("SKIPPED a player data GameTest: test Postgres is not running, so it passes without checking anything.")
+        helper.succeed()
+        null
+    }
+
     private fun withDatabase(
         helper: GameTestHelper,
         writeStore: (PlayerDataTestDatabase) -> PlayerDataStore = { it.newStore() },
@@ -113,13 +130,7 @@ object PlayerDataSyncGameTests {
         extras: (MinecraftServer) -> List<PlayerExtra> = { emptyList() },
         test: Fixture.() -> Unit,
     ) {
-        val database = try {
-            PlayerDataTestDatabase(SCHEMA)
-        } catch (_: TestAbortedException) {
-            NeoPlayerSync.LOGGER.warn("SKIPPED a player data GameTest: test Postgres is not running, so it passes without checking anything.")
-            helper.succeed()
-            return
-        }
+        val database = openDatabaseOrSkip(helper) ?: return
         database.newStore().prepareTables()
         val service = PlayerDataService(
             helper.level.server,
@@ -567,6 +578,116 @@ object PlayerDataSyncGameTests {
         helper.level.server.playerList.remove(player)
         finishWhen("The final save should be stored") { savedCount(player) == 1 && ownedCount(player) == 0 }
     }
+
+    /**
+     * A full backend crashes and the proxy sends all its players to one fallback server at once. Their rows stay held by
+     * the dead server, so every join waits out the stale-lease watch on the one claims thread, then loads a heavy save
+     * there too, and must still be admitted within the join wait.
+     */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-crash-burst")
+    fun aCrashedBackendsPlayersAllJoinTheFallbackServer(helper: GameTestHelper) {
+        val database = openDatabaseOrSkip(helper) ?: return
+        val server = helper.level.server
+        val data = ByteArrayOutputStream().also { NbtIo.writeCompressed(heavySave(helper), it) }.toByteArray()
+        val players = List(CRASH_BURST_PLAYERS) { UUID.randomUUID() }
+        val saveFolder = Files.createTempDirectory("neoplayersync-burst")
+        val claims = ScheduledThreadPoolExecutor(1).apply { executeExistingDelayedTasksAfterShutdownPolicy = false }
+        val store = PlayerDataStore { withLatency(database.newConnectionForTest(), CRASH_BURST_ROUND_TRIP_MILLIS) }
+        try {
+            val seeds = database.newStore()
+            seeds.prepareTables()
+            val crashed = UUID.randomUUID()
+            for (playerId in players) {
+                checkNotNull(seeds.claim(playerId, crashed, "crashed"))
+                seeds.save(playerId, crashed, data, savedTick = 100L)
+            }
+
+            val outcomes = Array(players.size) { BurstClient() }
+            val start = System.nanoTime()
+            for ((index, playerId) in players.withIndex()) {
+                PlayerDataLoadTask(
+                    playerId = playerId,
+                    client = outcomes[index],
+                    store = store,
+                    executor = claims,
+                    saveFolder = saveFolder,
+                    fixer = server.fixerUpper,
+                    registries = server.registryAccess(),
+                    serverName = "fallback",
+                ).run(Consumer { })
+            }
+            val waitSeconds = LeaseTiming.WAIT.inWholeSeconds + LeaseTiming.LEASE.inWholeSeconds + 30L
+            helper.assertTrue(outcomes.all { it.finished.await(waitSeconds, TimeUnit.SECONDS) }, "Some joins never finished")
+
+            val admitted = outcomes.filter { it.admittedAtNanos != null }
+            val slowest = admitted.maxOfOrNull { TimeUnit.NANOSECONDS.toMillis(checkNotNull(it.admittedAtNanos) - start) }
+            NeoPlayerSync.LOGGER.info(
+                "Crash burst: {} of {} players admitted, slowest after {} ms, at {} ms per round trip and {} KB per save",
+                admitted.size, players.size, slowest, CRASH_BURST_ROUND_TRIP_MILLIS, data.size / 1024,
+            )
+            helper.assertTrue(
+                admitted.size == players.size,
+                "${players.size - admitted.size} of ${players.size} players were refused: ${outcomes.firstNotNullOfOrNull { it.refusedWith }?.string}",
+            )
+            helper.succeed()
+        } finally {
+            claims.submit { store.close() }.get()
+            claims.shutdown()
+            database.close()
+            saveFolder.toFile().deleteRecursively()
+        }
+    }
+
+    /** A modded endgame player: a full inventory of named, enchanted gear and an ender chest of full shulker boxes. */
+    private fun heavySave(helper: GameTestHelper): CompoundTag {
+        val player = TestPlayers.survival(helper, "burst")
+        val sharpness = helper.level.registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS)
+        for (slot in 0 until 36) {
+            player.inventory.setItem(slot, ItemStack(Items.DIAMOND_SWORD).apply {
+                enchant(sharpness, 5)
+                set(DataComponents.CUSTOM_NAME, Component.literal("Blade $slot"))
+            })
+        }
+        for (slot in 0 until 27) {
+            player.enderChestInventory.setItem(slot, ItemStack(Items.SHULKER_BOX).apply {
+                // Unique names, because identical stacks compress to almost nothing and real saves do not.
+                set(DataComponents.CONTAINER, ItemContainerContents.fromItems(List(27) {
+                    ItemStack(Items.ENCHANTED_GOLDEN_APPLE, 64).apply { set(DataComponents.CUSTOM_NAME, Component.literal(UUID.randomUUID().toString())) }
+                }))
+            })
+        }
+        val save = NbtUtils.addCurrentDataVersion(player.saveEntityForTest())
+        helper.level.server.playerList.remove(player)
+        return save
+    }
+
+    private class BurstClient : JoiningClient {
+        override val connected = true
+        val finished = CountDownLatch(1)
+
+        @Volatile
+        var admittedAtNanos: Long? = null
+
+        @Volatile
+        var refusedWith: Component? = null
+
+        override fun admit(beforeContinuing: () -> Unit, ifGone: () -> Unit) {
+            beforeContinuing()
+            admittedAtNanos = System.nanoTime()
+            finished.countDown()
+        }
+
+        override fun refuse(reason: Component) {
+            refusedWith = reason
+            finished.countDown()
+        }
+    }
+
+    private const val CRASH_BURST_PLAYERS = 500
+
+    /** A database in the same region but not on the same machine. Before claims read the lease in the same round trip, 96 of 500 were refused here. */
+    private const val CRASH_BURST_ROUND_TRIP_MILLIS = 10L
 
     private const val SCHEMA = "neoplayersync_sync_test"
 

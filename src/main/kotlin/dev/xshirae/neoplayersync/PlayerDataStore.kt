@@ -14,6 +14,9 @@ internal class SavedPlayer(val data: ByteArray, val savedTick: Long, val elapsed
 /** A successful claim. [saved] is null until the player's first save. [extras] holds one entry per stored [PlayerExtra] kind. */
 internal class PlayerClaim(val schemaVersion: Int, val saved: SavedPlayer?, val extras: JsonObject = JsonObject())
 
+/** Either [claim] succeeded, or another session holds the player with [heldLease], which is null if none was seen. */
+internal class ClaimAttempt(val claim: PlayerClaim?, val heldLease: Long?)
+
 /**
  * All SQL for player data. It holds one connection and reconnects after a failure, so each instance belongs to one thread.
  * A session ID proves ownership: a server that lost its claim changes nothing, whatever its lease says.
@@ -52,36 +55,33 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
     }
 
     /**
-     * Returns null while another session holds this player. This takes over an expired lease only when it still equals
-     * [staleLease], a value from [leaseOf] that the caller watched stay unchanged. After a database outage every lease
-     * has expired while holders may still have saves waiting, so expiry proves nothing. A session that already holds
-     * the player claims it again, so a retry after a claim whose reply was lost gets the row back at once.
+     * Claims the player, or reports the holder's lease in the same round trip, so a server with many joins waiting
+     * reaches each of them sooner. This takes over an expired lease only when it still equals [staleLease], a lease from
+     * an earlier attempt that the caller watched stay unchanged. After a database outage every lease has expired while
+     * holders may still have saves waiting, so expiry proves nothing. A session that already holds the player claims it
+     * again, so a retry after a claim whose reply was lost gets the row back at once.
      */
-    fun claim(playerId: UUID, sessionId: UUID, serverName: String, staleLease: Long? = null): PlayerClaim? = withConnection { connection ->
-        connection.prepareStatement(CLAIM).use { statement ->
+    fun tryClaim(playerId: UUID, sessionId: UUID, serverName: String, staleLease: Long? = null): ClaimAttempt = withConnection { connection ->
+        connection.prepareStatement(TRY_CLAIM).use { statement ->
             statement.setObject(1, playerId)
             statement.setInt(2, PLAYER_DATA_SCHEMA)
             statement.setObject(3, sessionId)
             statement.setString(4, serverName)
             if (staleLease == null) statement.setNull(5, Types.BIGINT) else statement.setLong(5, staleLease)
+            statement.setObject(6, playerId)
             statement.executeQuery().use { row ->
-                if (!row.next()) return@withConnection null
+                if (!row.next()) return@withConnection ClaimAttempt(claim = null, heldLease = null)
+                val schemaVersion = row.getInt(1)
+                if (row.wasNull()) return@withConnection ClaimAttempt(claim = null, heldLease = row.getLong(6).takeUnless { row.wasNull() })
                 val data = row.getBytes(2)
-                PlayerClaim(
-                    schemaVersion = row.getInt(1),
+                val claim = PlayerClaim(
+                    schemaVersion = schemaVersion,
                     saved = data?.let { SavedPlayer(it, row.getLong(3), row.getLong(4)) },
                     // Only `||` of two objects ever writes the column, so it always holds an object.
                     extras = row.getString(5)?.let { JsonParser.parseString(it).asJsonObject } ?: JsonObject(),
                 )
+                ClaimAttempt(claim, heldLease = null)
             }
-        }
-    }
-
-    /** The holder's lease as an exact number that changes on every renewal, or null when nobody holds the player. */
-    fun leaseOf(playerId: UUID): Long? = withConnection { connection ->
-        connection.prepareStatement(LEASE_OF).use { statement ->
-            statement.setObject(1, playerId)
-            statement.executeQuery().use { row -> if (row.next()) row.getLong(1).takeUnless { row.wasNull() } else null }
         }
     }
 
@@ -192,7 +192,6 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
                 "extra = coalesce(extra, '{}'::jsonb) || ?::jsonb"
         private const val OWNED_BY_SESSION = "WHERE player_id = ? AND owner_session = ?"
         private const val LEASE_MICROS = "(extract(epoch FROM neoplayersync_player.lease_until) * 1000000)::bigint"
-        private const val LEASE_OF = "SELECT $LEASE_MICROS FROM neoplayersync_player WHERE player_id = ? AND owner_session IS NOT NULL"
 
         /** Each entry upgrades the layout by one version. Add new entries at the end and never edit old ones. */
         private val SCHEMA_STEPS = listOf(
@@ -214,15 +213,26 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
             "ALTER TABLE neoplayersync_player ADD COLUMN extra jsonb",
         )
 
-        private val CLAIM = """
-            INSERT INTO neoplayersync_player (player_id, schema_version, owner_session, owner_server, lease_until)
-            VALUES (?, ?, ?, ?, $NEW_LEASE)
-            ON CONFLICT (player_id) DO UPDATE
-                SET owner_session = EXCLUDED.owner_session, owner_server = EXCLUDED.owner_server, lease_until = EXCLUDED.lease_until
-                WHERE neoplayersync_player.owner_session IS NULL
-                    OR neoplayersync_player.owner_session = EXCLUDED.owner_session
-                    OR (neoplayersync_player.lease_until < now() AND ${LEASE_MICROS} = ?)
-            RETURNING schema_version, data, saved_tick, (extract(epoch FROM now() - saved_at) * 1000)::bigint, extra::text
+        /**
+         * The second branch reads the row as it was before this statement, which is what a separate read just before
+         * would have seen. A renewal that lands meanwhile only makes the caller watch an older lease, which then no
+         * longer matches, so it can delay a takeover but never allow one.
+         */
+        private val TRY_CLAIM = """
+            WITH claimed AS (
+                INSERT INTO neoplayersync_player (player_id, schema_version, owner_session, owner_server, lease_until)
+                VALUES (?, ?, ?, ?, $NEW_LEASE)
+                ON CONFLICT (player_id) DO UPDATE
+                    SET owner_session = EXCLUDED.owner_session, owner_server = EXCLUDED.owner_server, lease_until = EXCLUDED.lease_until
+                    WHERE neoplayersync_player.owner_session IS NULL
+                        OR neoplayersync_player.owner_session = EXCLUDED.owner_session
+                        OR (neoplayersync_player.lease_until < now() AND ${LEASE_MICROS} = ?)
+                RETURNING schema_version, data, saved_tick, (extract(epoch FROM now() - saved_at) * 1000)::bigint AS age_millis, extra::text AS extra
+            )
+            SELECT schema_version, data, saved_tick, age_millis, extra, NULL::bigint FROM claimed
+            UNION ALL
+            SELECT NULL, NULL, NULL, NULL, NULL, $LEASE_MICROS FROM neoplayersync_player
+                WHERE player_id = ? AND owner_session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM claimed)
         """
         private val SAVE = "UPDATE neoplayersync_player SET $WRITE_SAVE, lease_until = $NEW_LEASE $OWNED_BY_SESSION"
         private const val SAVE_AND_RELEASE =

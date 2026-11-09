@@ -3,6 +3,7 @@ package dev.xshirae.neoplayersync
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.sql.Connection
 import java.sql.SQLException
+import java.util.UUID
 
 /**
  * tools/test-postgres.ps1's database, inside a schema of its own, so tests never touch a real database's tables.
@@ -51,4 +52,15 @@ internal class PlayerDataTestDatabase(val schema: String) : AutoCloseable {
         sql("DROP SCHEMA IF EXISTS $schema CASCADE")
         admin?.close()
     }
+}
+
+/** [PlayerDataStore.tryClaim] for tests that do not watch the holder's lease. */
+internal fun PlayerDataStore.claim(playerId: UUID, sessionId: UUID, serverName: String, staleLease: Long? = null): PlayerClaim? =
+    tryClaim(playerId, sessionId, serverName, staleLease).claim
+
+/** The holder's lease, read through a claim by a new session, which fails while someone holds [playerId]. */
+internal fun PlayerDataStore.leaseOf(playerId: UUID): Long {
+    val attempt = tryClaim(playerId, UUID.randomUUID(), "probe")
+    check(attempt.claim == null) { "Nobody held $playerId, so reading the lease claimed it" }
+    return checkNotNull(attempt.heldLease)
 }

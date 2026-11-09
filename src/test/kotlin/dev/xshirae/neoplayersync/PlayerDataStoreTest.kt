@@ -199,7 +199,23 @@ class PlayerDataStoreTest {
         store.heartbeat(listOf(sessionA))
         expireLease()
         assertNull(store.claim(player, sessionB, "b", watched), "a lease renewed since it was watched must not be taken over")
-        assertNull(store.leaseOf(UUID.randomUUID()))
+    }
+
+    @Test
+    fun `a refused claim reports the holder's lease, which takes the player over once it expired unrenewed`() {
+        store.claim(player, sessionA, "a")
+        val held = store.tryClaim(player, sessionB, "b")
+        assertNull(held.claim)
+        assertNotNull(held.heldLease)
+
+        expireLease()
+        val expired = store.tryClaim(player, sessionB, "b")
+        assertNull(expired.claim, "expiry alone must not hand the player over")
+        assertNotNull(store.tryClaim(player, sessionB, "b", expired.heldLease).claim)
+
+        val fresh = store.tryClaim(UUID.randomUUID(), sessionB, "b")
+        assertNotNull(fresh.claim, "a player nobody holds is claimed at once")
+        assertNull(fresh.heldLease)
     }
 
     @Test

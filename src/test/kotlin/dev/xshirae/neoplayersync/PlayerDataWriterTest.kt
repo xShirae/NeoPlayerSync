@@ -1,11 +1,6 @@
 package dev.xshirae.neoplayersync
 
 import com.google.gson.JsonObject
-import java.lang.reflect.InvocationTargetException
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
-import java.sql.Connection
-import java.sql.PreparedStatement
 import java.sql.SQLException
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -256,28 +251,6 @@ class PlayerDataWriterTest {
             shutdownExecutor.shutdown()
         }
     }
-
-    /** Adds [millis] before every statement runs, like a database on another machine. */
-    private fun withLatency(connection: Connection, millis: Long): Connection =
-        proxy(connection) { result -> if (result is PreparedStatement) delayed(result, millis) else result }
-
-    private fun delayed(statement: PreparedStatement, millis: Long): PreparedStatement = proxy(statement, before = { method ->
-        if (method.name.startsWith("execute")) Thread.sleep(millis)
-    }) { it }
-
-    private inline fun <reified T : Any> proxy(
-        target: T,
-        crossinline before: (Method) -> Unit = {},
-        crossinline wrap: (Any?) -> Any?,
-    ): T = Proxy.newProxyInstance(T::class.java.classLoader, arrayOf(T::class.java)) { _, method, args ->
-        before(method)
-        try {
-            wrap(method.invoke(target, *(args ?: emptyArray())))
-        } catch (exception: InvocationTargetException) {
-            // The store must see the driver's SQLException, not the reflection wrapper.
-            throw exception.targetException
-        }
-    } as T
 
     private companion object {
         const val SCHEMA = "neoplayersync_writer_test"
