@@ -54,8 +54,8 @@ internal class PlayerDataWriter(
     private val lock = Any()
     private val pending = LinkedHashMap<UUID, PlayerWrite>()
 
-    /** The fingerprint each session last stored. Only the writer thread uses it. */
-    private val lastSent = HashMap<UUID, ByteArray>()
+    /** What each session last stored. Only the writer thread uses it. */
+    private val lastSent = HashMap<UUID, SentSave>()
     private var inFlight: UUID? = null
     private var draining = false
     private var retryMillis = FIRST_RETRY_MILLIS
@@ -123,16 +123,23 @@ internal class PlayerDataWriter(
             return store.release(write.playerId, write.sessionId)
         }
         val extras = write.extras.toString()
-        val print = fingerprintOrNull(write, data)?.let { it + extrasDigest(write.extras) }
+        val print = fingerprintOrNull(write, data)
+        val extraPrints = extraDigests(write.extras)
+        val last = lastSent[write.sessionId]
         // An idle player's timed save repeats what is stored. A release must still go out, or the row stays held.
-        if (!write.release && print != null && print.contentEquals(lastSent[write.sessionId])) return true
+        if (!write.release && print != null && last != null && last.matches(print, extraPrints)) return true
 
         val owned = if (write.release) {
             store.saveAndRelease(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis(), extras)
         } else {
             store.save(write.playerId, write.sessionId, data, write.savedTick, write.ageMillis(), extras)
         }
-        if (owned && !write.release && print != null) lastSent[write.sessionId] = print else lastSent.remove(write.sessionId)
+        if (owned && !write.release && print != null) {
+            // The database keeps the kinds this save left out, so their last digests still describe the row.
+            lastSent[write.sessionId] = SentSave(print, last?.extras.orEmpty() + extraPrints)
+        } else {
+            lastSent.remove(write.sessionId)
+        }
         return owned
     }
 
@@ -144,9 +151,14 @@ internal class PlayerDataWriter(
         null
     }
 
-    /** A hash rather than the text, which can run to hundreds of kilobytes for each online player. */
-    private fun extrasDigest(extras: JsonObject): ByteArray =
-        MessageDigest.getInstance("SHA-256").digest(comparableExtras(extras).toString().toByteArray())
+    /**
+     * One hash per kind, so a save carrying only some kinds compares against what is stored for those. Hashes rather
+     * than the text, which can run to hundreds of kilobytes for each online player.
+     */
+    private fun extraDigests(extras: JsonObject): Map<String, ByteArray> =
+        comparableExtras(extras).entrySet().associate { (id, entry) ->
+            id to MessageDigest.getInstance("SHA-256").digest(entry.toString().toByteArray())
+        }
 
     private fun retryLater(failed: PlayerWrite) {
         synchronized(lock) {
@@ -156,6 +168,13 @@ internal class PlayerDataWriter(
             executor.schedule(::drain, retryMillis, TimeUnit.MILLISECONDS)
             retryMillis = (retryMillis * 2).coerceAtMost(MAX_RETRY_MILLIS)
         }
+    }
+
+    /** A stored save's fingerprint, with a digest for each extra kind stored with it or kept from earlier saves. */
+    private class SentSave(val save: ByteArray, val extras: Map<String, ByteArray>) {
+        /** True when the save and every kind it carries equal what is stored. */
+        fun matches(save: ByteArray, extras: Map<String, ByteArray>): Boolean =
+            save.contentEquals(this.save) && extras.all { (id, digest) -> digest.contentEquals(this.extras[id]) }
     }
 
     private companion object {

@@ -154,6 +154,22 @@ class PlayerDataWriterTest {
     }
 
     @Test
+    fun `a save that leaves out a stored extra is compared on what it carries`() {
+        fun send(tick: Long, vararg entries: Pair<String, Int>) {
+            writer.submit(PlayerWrite(player, session, byteArrayOf(1), tick, release = false, extras = extras(*entries)))
+            assertFlushed()
+        }
+        send(1L, "statistics" to 1)
+        send(2L, "advancements" to 1)
+        assertEquals(2, storedTick(), "a kind stored for the first time should be sent")
+        send(3L, "advancements" to 1, "statistics" to 1)
+        send(4L)
+        assertEquals(2, storedTick(), "kinds that match what is stored, or that a save leaves out, are no change")
+        send(5L, "statistics" to 2)
+        assertEquals(5, storedTick(), "a changed kind should be sent")
+    }
+
+    @Test
     fun `merging keeps every extra and the newest value of each`() {
         val older = PlayerWrite(player, session, byteArrayOf(1), 1L, release = false, extras = extras("advancements" to 1, "statistics" to 1))
         val newer = PlayerWrite(player, session, byteArrayOf(2), 2L, release = false, extras = extras("advancements" to 2))

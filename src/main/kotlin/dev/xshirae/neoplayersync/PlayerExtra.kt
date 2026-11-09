@@ -23,7 +23,8 @@ internal interface PlayerExtra {
 
     /**
      * True when every change reaches [PlayerDataService.onExtraChanged], so saves without one skip this kind and leave
-     * the stored copy as it is. False exports it with every save.
+     * the stored copy as it is. False exports it only with the timed save, a respawn, the final save and `/nps sync`, so
+     * a crash can cost up to a minute of it.
      */
     val tracksChanges: Boolean
 
@@ -72,7 +73,7 @@ internal object PlayerExtras {
 
     fun statistics(server: MinecraftServer) = JsonFileExtra(
         id = "statistics",
-        // Statistics change all the time, and no event reports every counter, so each save exports them.
+        // Counters move every tick, so exporting them on each inventory save would only repeat that work.
         tracksChanges = false,
         folder = server.getWorldPath(LevelResource.PLAYER_STATS_DIR),
         saveFile = { it.stats.save() },

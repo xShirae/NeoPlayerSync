@@ -29,7 +29,7 @@ internal class PlayerDataSession(
     var unshiftedSave: SavedPlayer?,
     /** Per synced [PlayerExtra]: only what this server could not load, which every export must keep. */
     val unloadedExtras: JsonObject,
-    /** Ids of change-tracking kinds with a change not yet exported. */
+    /** Ids of kinds the next save exports: a tracked kind that changed, or an untracked one whose timed, respawn, sync or final save is due. */
     val changedExtras: MutableSet<String>,
     /** The attachment types of the stored character, until [PlayerDataService.onLoaded] checks that each one loaded. */
     var storedAttachments: Set<String>,
@@ -60,6 +60,7 @@ internal class PlayerDataService(
     private val writeThread = singleThread("NeoPlayerSync saves")
     private val leaseThread = singleThread("NeoPlayerSync leases")
     private val extrasById = extras.associateBy { it.id }
+    private val untrackedExtras = extras.filterNot { it.tracksChanges }.map { it.id }
     private val writer = PlayerDataWriter(writeStore, writeThread, PlayerDataMerge::travellingDigest, ::comparableExtras, ::onClaimLost)
     private val sessions = ConcurrentHashMap<UUID, PlayerDataSession>()
     /** Players waiting for an inventory save, oldest first, with when each started waiting. */
@@ -172,6 +173,7 @@ internal class PlayerDataService(
     fun onRespawn(player: ServerPlayer) {
         val session = sessions[player.uuid] ?: return
         watchInventory(player, session)
+        session.changedExtras += untrackedExtras
         urgentSaves += player.uuid
     }
 
@@ -184,7 +186,9 @@ internal class PlayerDataService(
     }
 
     fun onLoggedOut(player: ServerPlayer) {
-        sessions[player.uuid]?.closing = true
+        val session = sessions[player.uuid] ?: return
+        session.closing = true
+        session.changedExtras += untrackedExtras
     }
 
     /** Vanilla wrote this player's file. Every save reaches the database through here, whatever triggered it. */
@@ -207,13 +211,13 @@ internal class PlayerDataService(
     }
 
     /**
-     * A kind left out of the result keeps its stored copy: an unchanged tracked kind, or one that failed to export,
-     * which then stays marked as changed so the next save tries again.
+     * A kind left out of the result keeps its stored copy: one not marked as changed, or one that failed to export,
+     * which then stays marked so the next save tries again.
      */
     private fun exportExtras(player: ServerPlayer, session: PlayerDataSession): JsonObject {
         val exported = JsonObject()
         for (extra in extras) {
-            if (extra.tracksChanges && extra.id !in session.changedExtras) continue
+            if (extra.id !in session.changedExtras) continue
             try {
                 val export = extra.export(player, session.unloadedExtras.get(extra.id))
                 if (export.unloaded != null) session.unloadedExtras.add(extra.id, export.unloaded) else session.unloadedExtras.remove(extra.id)
@@ -235,6 +239,7 @@ internal class PlayerDataService(
         if (tick % CHECK_INTERVAL_TICKS == 0L) checkEverySecond()
         for (session in sessions.values) {
             if (session.inWorld && isTimedSaveTick(session.playerId, tick)) {
+                session.changedExtras += untrackedExtras
                 urgentSaves += session.playerId
             }
         }
@@ -291,6 +296,7 @@ internal class PlayerDataService(
         for (session in sessions.values) {
             if (!session.inWorld || session.closing) continue
             val before = session.uploads
+            session.changedExtras += untrackedExtras
             savePlayer(session.playerId)
             if (session.uploads == before) failed++ else sent += session.sessionId
         }

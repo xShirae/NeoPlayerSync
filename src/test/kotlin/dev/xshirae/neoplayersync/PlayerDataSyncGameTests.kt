@@ -23,6 +23,7 @@ import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.item.component.ItemContainerContents
 import net.minecraft.world.item.enchantment.Enchantments
+import net.minecraft.world.level.storage.LevelResource
 import net.minecraft.world.level.storage.TagValueInput
 import net.neoforged.neoforge.event.EventHooks
 import org.opentest4j.TestAbortedException
@@ -253,6 +254,43 @@ object PlayerDataSyncGameTests {
                 storedExtraHas(player, "'advancements' ? 'minecraft:story/root'") &&
                 storedExtraHas(player, "'statistics' -> 'stats' -> 'minecraft:custom' ? 'minecraft:jump'")
         }
+    }
+
+    /**
+     * The export writes the local statistics file, so its absence shows a save left statistics out. Leaving is covered
+     * by [advancementsAndStatisticsEarnedJustBeforeLeavingAreStored], since vanilla writes that file on logout anyway.
+     */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-statistics-timing")
+    fun statisticsTravelOnlyWithTimedSavesRespawnsAndSync(helper: GameTestHelper) = withDatabase(
+        helper,
+        extras = { listOf(PlayerExtras.statistics(it)) },
+    ) {
+        val (player, _) = claimedPlayer("sync-stats")
+        val server = helper.level.server
+        val statsFile = server.getWorldPath(LevelResource.PLAYER_STATS_DIR).resolve("${player.uuid}.json")
+        val localSave = server.playerList.playerIo.playerDir.toPath().resolve("${player.uuid}.dat")
+        fun exportsStatistics(what: String, expected: Boolean, save: () -> Unit) {
+            Files.deleteIfExists(statsFile)
+            Files.deleteIfExists(localSave)
+            save()
+            helper.assertTrue(Files.exists(localSave), "$what should save the player")
+            helper.assertTrue(Files.exists(statsFile) == expected, "$what should ${if (expected) "" else "not "}export statistics")
+        }
+        exportsStatistics("An inventory save", false) {
+            player.inventory.add(ItemStack(Items.DIAMOND, 1))
+            player.inventoryMenu.broadcastChanges()
+            service.onTick(generateSequence(20L) { it + 20L }.first { !service.isTimedSaveTick(player.uuid, it) })
+        }
+        exportsStatistics("The timed save", true) { service.onTick(generateSequence(1L) { it + 1L }.first { service.isTimedSaveTick(player.uuid, it) }) }
+        exportsStatistics("A respawn", true) {
+            service.onRespawn(player)
+            service.onTick(generateSequence(1L) { it + 1L }.first { it % 20L != 0L && !service.isTimedSaveTick(player.uuid, it) })
+        }
+        exportsStatistics("/nps sync", true) { service.saveAllNow() }
+        server.playerList.remove(player)
+        finish()
+        helper.succeed()
     }
 
     /** A marker planted in the stored advancements shows whether a save replaced them. */
