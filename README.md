@@ -156,6 +156,10 @@ public static void onLoad(PlayerEvent.LoadFromFile event) {
 
 Without NeoPlayerSync installed, the tag never appears and your listener does nothing.
 
+### Database connections
+
+Each server keeps 3 connections open to PostgreSQL. One loads players as they join, one sends their saves, and one renews the server's hold on the players it has. Set `max_connections` in PostgreSQL to at least 3 per backend, plus room for anything else that uses the database.
+
 ## Building
 
 You need Java 25. On Windows:
