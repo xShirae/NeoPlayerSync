@@ -184,9 +184,11 @@ internal class PlayerDataService(
 
     /**
      * The inventory listener hears nothing while another menu is open, and the ender chest has no listener.
-     * A client can send close packets whenever it likes, so this marks the player for a capped save instead.
+     * A client can send close packets whenever it likes, so this marks the player for a capped save instead. Closing the
+     * player's own inventory needs none: the listener heard every change while it was open.
      */
-    fun onContainerClosed(player: ServerPlayer) {
+    fun onContainerClosed(player: ServerPlayer, menu: AbstractContainerMenu) {
+        if (menu === player.inventoryMenu) return
         sessions[player.uuid]?.inventoryChanged = true
     }
 

@@ -78,7 +78,7 @@ object PlayerDataSync {
 
     @SubscribeEvent
     fun onContainerClosed(event: PlayerContainerEvent.Close) {
-        (event.entity as? ServerPlayer)?.let { service?.onContainerClosed(it) }
+        (event.entity as? ServerPlayer)?.let { service?.onContainerClosed(it, event.container) }
     }
 
     @SubscribeEvent

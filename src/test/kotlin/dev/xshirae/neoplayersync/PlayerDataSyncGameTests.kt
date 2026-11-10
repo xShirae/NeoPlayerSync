@@ -18,6 +18,7 @@ import net.minecraft.util.ProblemReporter
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.inventory.AbstractContainerMenu
+import net.minecraft.world.inventory.ChestMenu
 import net.minecraft.world.inventory.ContainerListener
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
@@ -513,7 +514,10 @@ object PlayerDataSyncGameTests {
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-close")
     fun closingContainersStaysWithinTheBudget(helper: GameTestHelper) = withDatabase(helper) {
         val players = (1..5).map { claimedPlayer("sync-close$it").first }
-        players.forEach { it.doCloseContainer() }
+        players.forEach {
+            it.containerMenu = ChestMenu.threeRows(1, it.inventory)
+            it.doCloseContainer()
+        }
         helper.assertTrue(players.none(::localSaveExists), "Closing a container must not save right away")
 
         val tick = quietCheckTick(players)
@@ -525,6 +529,20 @@ object PlayerDataSyncGameTests {
                 if (done) players.forEach(helper.level.server.playerList::remove)
             }
         }
+    }
+
+    /** The slot listener heard every change while the player's own inventory was open, so closing it saves nothing. */
+    @JvmStatic
+    @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-close-own")
+    fun closingTheirOwnInventorySavesNothing(helper: GameTestHelper) = withDatabase(helper) {
+        val (player, _) = claimedPlayer("sync-close-own")
+        player.doCloseContainer()
+        service.onTick(quietCheckTick(listOf(player)))
+        helper.assertTrue(!localSaveExists(player) && service.inventorySavesWaiting == 0, "Closing their own inventory should queue no save")
+
+        helper.level.server.playerList.remove(player)
+        finish()
+        helper.succeed()
     }
 
     @JvmStatic
