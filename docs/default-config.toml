@@ -10,7 +10,7 @@ port = 5432
 database = "minecraft"
 #A user who can create tables in that database.
 user = "minecraft"
-#That user's password. It is stored in plain text, so restrict this file and keep it out of shared modpacks.
+#That user's password. This file keeps it in plain text, so restrict this file and keep it out of shared modpacks.
 password = ""
 #Refuse a connection that is not encrypted. Turn this off only if the database is on this machine.
 require_ssl = true

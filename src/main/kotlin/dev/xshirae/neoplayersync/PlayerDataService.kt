@@ -40,7 +40,7 @@ internal class PlayerDataSession(
     var closing = false
     /** An item was gained, lost, moved or replaced, or a menu closed. */
     var inventoryChanged = false
-    /** Only data on an item changed, such as a mod's charge or energy. Never wear, which waits for the timed save. */
+    /** Only data on an item changed, such as a mod's charge or energy. Wear waits for the timed save instead. */
     var itemDataChanged = false
     /** Counts saves handed to the writer, so a caller can tell whether vanilla's save went through. */
     var uploads = 0
@@ -281,7 +281,7 @@ internal class PlayerDataService(
             leaseStore.ping()
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
         }, leaseThread).also { ping = it }
-        // The timeout goes on a copy, so the shared query counts as running until the lease thread really finishes it.
+        // The timeout goes on a copy, so the shared query counts as running until the lease thread finishes it.
         return running.copy().orTimeout(COMMAND_WAIT_SECONDS, TimeUnit.SECONDS)
     }
 
@@ -324,7 +324,7 @@ internal class PlayerDataService(
     }
 
     /**
-     * A time budget rather than a count, so a light modpack saves many players per tick and a heavy one fewer. Item data
+     * A time budget, so a light modpack saves many players per tick and a heavy one fewer. Item data
      * goes last, so players whose charge items change every second never delay a pickup. If the budget never reaches
      * them, the timed save does.
      */
@@ -386,7 +386,7 @@ internal class PlayerDataService(
      * Other changes that keep the item and count, such as a mod's charge, queue behind real inventory changes.
      */
     private fun watchInventory(player: ServerPlayer, session: PlayerDataSession) {
-        // Vanilla hands listeners a fresh copy of each changed stack and never changes it afterwards, so it can be kept as is.
+        // Vanilla hands listeners a fresh copy of each changed stack and never changes it afterwards, so this keeps it as is.
         val lastSeen = HashMap<Int, ItemStack>()
         player.inventoryMenu.addSlotListener(object : ContainerListener {
             override fun slotChanged(menu: AbstractContainerMenu, slot: Int, stack: ItemStack) {
@@ -486,7 +486,7 @@ internal class PlayerDataService(
         /** Well under the shortest common idle cutoff, about four minutes on cloud load balancers. */
         const val KEEP_ALIVE_SECONDS = 60L
 
-        /** Each save runs on the server thread, so a burst of changes waits rather than causing lag. 3 ms is 6% of a tick. */
+        /** Each save runs on the server thread, so a burst of changes spreads over several ticks. 3 ms is 6% of a tick. */
         val INVENTORY_SAVE_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(3L)
         val BACKLOG_WARNING_NANOS = TimeUnit.SECONDS.toNanos(5L)
         val BACKLOG_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1L)

@@ -257,8 +257,8 @@ object PlayerDataSyncGameTests {
     }
 
     /**
-     * The export writes the local statistics file, so its absence shows a save left statistics out. Leaving is covered
-     * by [advancementsAndStatisticsEarnedJustBeforeLeavingAreStored], since vanilla writes that file on logout anyway.
+     * The export writes the local statistics file, so its absence shows a save left statistics out.
+     * [advancementsAndStatisticsEarnedJustBeforeLeavingAreStored] covers leaving, since vanilla writes that file on logout anyway.
      */
     @JvmStatic
     @SyncGameTest(timeoutTicks = TIMEOUT_TICKS, template = "empty", batch = "player-data-sync-statistics-timing")
@@ -765,7 +765,7 @@ object PlayerDataSyncGameTests {
 
     private const val CRASH_BURST_PLAYERS = 500
 
-    /** A database in the same region but not on the same machine. Before claims read the lease in the same round trip, 96 of 500 were refused here. */
+    /** A database in the same region but not on the same machine. Before claims read the lease in the same round trip, this test refused 96 of 500. */
     private const val CRASH_BURST_ROUND_TRIP_MILLIS = 10L
 
     private const val SCHEMA = "neoplayersync_sync_test"

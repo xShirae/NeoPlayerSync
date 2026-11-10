@@ -56,7 +56,7 @@ internal object PlayerDataMerge {
         NbtIo.readCompressed(ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap())
 
     /**
-     * SHA-256 of only the [TRAVELLING_KEYS] in a save. Whole saves of an idle player differ from one save to the next,
+     * SHA-256 of the [TRAVELLING_KEYS] in a save and nothing else. Whole saves of an idle player differ from one save to the next,
      * while the part other servers load stays the same.
      */
     fun travellingDigest(save: ByteArray): ByteArray {

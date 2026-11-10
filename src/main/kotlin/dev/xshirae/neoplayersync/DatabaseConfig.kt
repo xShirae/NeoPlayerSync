@@ -33,7 +33,7 @@ internal object DatabaseConfig {
         .comment("A user who can create tables in that database.")
         .define("user", "minecraft")
     private val password = builder
-        .comment("That user's password. It is stored in plain text, so restrict this file and keep it out of shared modpacks.")
+        .comment("That user's password. This file keeps it in plain text, so restrict this file and keep it out of shared modpacks.")
         .define("password", "")
     private val requireSsl = builder
         .comment("Refuse a connection that is not encrypted. Turn this off only if the database is on this machine.")
@@ -57,7 +57,7 @@ internal object DatabaseConfig {
 
     val SPEC: ModConfigSpec = builder.build()
 
-    /** Why the server must not start with the operator's file, or null. */
+    /** The reason the server must not start with the operator's file, or null. */
     var startupProblem: String? = null
 
     /**

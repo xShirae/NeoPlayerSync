@@ -97,7 +97,7 @@ class DatabaseSettingsTest {
         }
     }
 
-    /** Runs on each loader the build targets, so a renamed config type fails here rather than leaking the password. */
+    /** Runs on each loader the build targets, so a renamed config type fails here before it can leak the password. */
     @Test
     fun `the config uses the loader's type that stays off clients`() {
         val expected = if ("LOCAL" in net.neoforged.fml.config.ModConfig.Type.values().map { it.name }) "LOCAL" else "COMMON"

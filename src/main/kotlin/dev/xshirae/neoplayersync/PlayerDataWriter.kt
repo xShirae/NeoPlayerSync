@@ -13,7 +13,7 @@ internal class PlayerWrite(
     val data: ByteArray?,
     val savedTick: Long,
     val release: Boolean,
-    /** [PlayerExtra] entries saved with [data]. Nothing changes them after the write is made, so any thread may read them. */
+    /** [PlayerExtra] entries saved with [data]. Nothing changes them once the write exists, so any thread may read them. */
     val extras: JsonObject = JsonObject(),
     /** When the game saved [data], on this server's own clock, so time spent waiting for the database still counts. */
     val savedAtNanos: Long = System.nanoTime(),
@@ -152,8 +152,8 @@ internal class PlayerDataWriter(
     }
 
     /**
-     * One hash per kind, so a save carrying only some kinds compares against what is stored for those. Hashes rather
-     * than the text, which can run to hundreds of kilobytes for each online player.
+     * One hash per kind, so a save carrying only some kinds compares against what is stored for those. It keeps hashes
+     * because the text can run to hundreds of kilobytes for each online player.
      */
     private fun extraDigests(extras: JsonObject): Map<String, ByteArray> =
         comparableExtras(extras).entrySet().associate { (id, entry) ->

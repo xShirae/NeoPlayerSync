@@ -91,7 +91,7 @@ internal class PlayerDataLoadTask(
         val claim = try {
             store.tryClaim(playerId, sessionId, serverName, staleLease()).also { if (it.claim == null) watch(it.heldLease) }.claim
         } catch (exception: Exception) {
-            // A dropped connection or a database restart often clears within the wait, and the store reconnects on the next try.
+            // A dropped connection or a database restart can clear within the wait, and the store reconnects on the next try.
             if (System.nanoTime() - deadline >= 0L) {
                 NeoPlayerSync.LOGGER.error("Could not claim player data for {}", playerId, exception)
                 client.refuse(LOAD_FAILED)

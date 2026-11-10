@@ -158,7 +158,7 @@ class PlayerDataStoreTest {
     @Test
     fun `a save without extras leaves the stored ones unwritten`() {
         store.claim(player, sessionA, "a")
-        // Random text does not compress, so it is stored outside the row.
+        // Random text does not compress, so Postgres stores it outside the row.
         val counters = (1..500).joinToString(",") { "\"k$it\":\"${UUID.randomUUID()}\"" }
         assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L, extras = """{"statistics":{$counters}}"""))
         fun storageId() = intQuery("SELECT pg_column_toast_chunk_id(extra)::bigint::int FROM $SCHEMA.neoplayersync_player")

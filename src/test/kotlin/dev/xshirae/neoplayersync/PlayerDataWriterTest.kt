@@ -272,7 +272,7 @@ class PlayerDataWriterTest {
         const val SCHEMA = "neoplayersync_writer_test"
         const val SHUTDOWN_PLAYERS = 500
 
-        /** Compressed NBT does not compress further, so random bytes stand in for a heavily modded player's save. */
+        /** Compressed NBT does not compress further, so random bytes stand in for the save of a player in a large modpack. */
         const val SAVE_BYTES = 64 * 1024
 
         /** A database in the same region but not on the same machine. */

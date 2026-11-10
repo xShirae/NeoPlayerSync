@@ -4,7 +4,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * The timings that keep a player on one server at a time. They only work together, so they live here and [init]
+ * The timings that keep a player on one server at a time. They depend on each other, so they live together here and [init]
  * refuses a combination that could hand a playing character to a second server.
  */
 internal object LeaseTiming {

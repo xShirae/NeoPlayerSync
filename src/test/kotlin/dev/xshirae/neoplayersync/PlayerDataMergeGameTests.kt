@@ -15,7 +15,7 @@ import net.minecraft.world.item.enchantment.Enchantments
 import net.minecraft.world.level.storage.TagValueInput
 import java.nio.file.Files
 
-/** Uses real player saves, so a renamed vanilla key or a broken attachment fails here rather than in play. */
+/** Uses real player saves, so a renamed vanilla key or a broken attachment fails here before it reaches players. */
 object PlayerDataMergeGameTests {
     private fun equippedPlayer(helper: GameTestHelper): ServerPlayer {
         val player = TestPlayers.survival(helper, "merge-full")
@@ -88,7 +88,7 @@ object PlayerDataMergeGameTests {
         helper.succeed()
     }
 
-    /** The timed save of an idle player is only worth skipping if its travelling part really stays the same. */
+    /** The timed save of an idle player is worth skipping only if its travelling part stays the same. */
     @JvmStatic
     @SyncGameTest(template = "empty", batch = "player-data")
     fun anIdlePlayersSavesKeepTheSameDigest(helper: GameTestHelper) {

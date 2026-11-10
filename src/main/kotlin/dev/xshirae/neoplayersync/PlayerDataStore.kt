@@ -214,7 +214,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
         )
 
         /**
-         * The second branch reads the row as it was before this statement, which is what a separate read just before
+         * The second branch reads the row as it was before this statement, the same row a separate read just before
          * would have seen. A renewal that lands meanwhile only makes the caller watch an older lease, which then no
          * longer matches, so it can delay a takeover but never allow one.
          */
