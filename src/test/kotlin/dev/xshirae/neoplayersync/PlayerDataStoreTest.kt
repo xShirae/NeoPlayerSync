@@ -275,6 +275,42 @@ class PlayerDataStoreTest {
     }
 
     @Test
+    fun `a read finds no row for an unknown player and creates none`() {
+        assertNull(store.read(player))
+        assertEquals(0, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player"))
+    }
+
+    @Test
+    fun `a read of a player never saved has no data`() {
+        assertNotNull(store.claim(player, sessionA, "a"))
+        assertTrue(store.release(player, sessionA))
+        val row = assertNotNull(store.read(player))
+        assertEquals(PlayerDataStore.PLAYER_DATA_SCHEMA, row.schemaVersion)
+        assertNull(row.data)
+    }
+
+    @Test
+    fun `a read returns the stored bytes`() {
+        assertNotNull(store.claim(player, sessionA, "a"))
+        assertTrue(store.saveAndRelease(player, sessionA, saveBytes, savedTick = 1L))
+        assertContentEquals(saveBytes, assertNotNull(store.read(player)).data)
+    }
+
+    @Test
+    fun `a read while another server holds the player leaves the lease alone`() {
+        assertNotNull(store.claim(player, sessionA, "a"))
+        assertTrue(store.save(player, sessionA, saveBytes, savedTick = 1L))
+        val reader = newStore()
+        val lease = reader.leaseOf(player)
+
+        assertContentEquals(saveBytes, assertNotNull(reader.read(player)).data)
+        assertEquals(lease, reader.leaseOf(player))
+        assertEquals(1, intQuery("SELECT count(*) FROM $SCHEMA.neoplayersync_player WHERE owner_session = '$sessionA' AND owner_server = 'a'"))
+        assertTrue(store.save(player, sessionA, byteArrayOf(9), savedTick = 2L), "the holder should keep saving after a read")
+        assertNull(reader.claim(player, sessionB, "b"), "a read must not free the player")
+    }
+
+    @Test
     fun `a wrong password fails to connect`() {
         val wrong = DatabaseSettings.validated("127.0.0.1", 5433, "neoplayersync", "neoplayersync", "wrong", requireSsl = false, serverName = "")
         assertFailsWith<SQLException> { wrong.connect() }

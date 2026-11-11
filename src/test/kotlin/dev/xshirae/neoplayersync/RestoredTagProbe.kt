@@ -1,5 +1,6 @@
 package dev.xshirae.neoplayersync
 
+import dev.xshirae.neoplayersync.api.NeoPlayerSyncApi
 import net.minecraft.nbt.CompoundTag
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
@@ -14,7 +15,7 @@ object RestoredTagProbe {
 
     @SubscribeEvent
     fun onLoaded(event: PlayerEvent.LoadFromFile) {
-        val tag = event.entity.persistentData.getCompound(NeoPlayerSync.RESTORED_TAG).orElse(null) ?: return
+        val tag = event.entity.persistentData.getCompound(NeoPlayerSyncApi.RESTORED_TAG).orElse(null) ?: return
         seen.computeIfAbsent(event.entity.uuid) { mutableListOf() } += tag.copy()
     }
 }

@@ -1,5 +1,6 @@
 package dev.xshirae.neoplayersync
 
+import dev.xshirae.neoplayersync.api.NeoPlayerSyncApi
 import net.minecraft.server.level.ServerPlayer
 import net.neoforged.bus.api.EventPriority
 import net.neoforged.bus.api.SubscribeEvent
@@ -16,6 +17,8 @@ import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent
 /** Routes game events to the service. With the database off, there is no service and every handler does nothing. */
 @EventBusSubscriber(modid = NeoPlayerSync.MOD_ID)
 object PlayerDataSync {
+    /** Other mods read this through the public API from any thread. */
+    @Volatile
     internal var service: PlayerDataService? = null
 
     @SubscribeEvent
@@ -63,7 +66,7 @@ object PlayerDataSync {
     /** Last, so the tag is gone before anything can save it into the player's file. */
     @SubscribeEvent(priority = EventPriority.LOWEST)
     fun afterLoaded(event: PlayerEvent.LoadFromFile) {
-        event.entity.persistentData.remove(NeoPlayerSync.RESTORED_TAG)
+        event.entity.persistentData.remove(NeoPlayerSyncApi.RESTORED_TAG)
     }
 
     @SubscribeEvent

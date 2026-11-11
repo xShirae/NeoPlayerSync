@@ -13,6 +13,9 @@ internal class SavedPlayer(val data: ByteArray, val savedTick: Long, val elapsed
 /** A successful claim. [saved] is null until the player's first save. [extras] holds one entry per stored [PlayerExtra] kind. */
 internal class PlayerClaim(val schemaVersion: Int, val saved: SavedPlayer?, val extras: JsonObject = JsonObject())
 
+/** A player's row as stored, read without claiming it. [data] is null until the player's first save. */
+internal class StoredRow(val schemaVersion: Int, val data: ByteArray?)
+
 /** Either [claim] succeeded, or another session holds the player with [heldLease], which is null if none was seen. */
 internal class ClaimAttempt(val claim: PlayerClaim?, val heldLease: Long?)
 
@@ -127,6 +130,17 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
         }
     }
 
+    /**
+     * Reads the row without claiming it. It never touches the owner or lease columns, and in autocommit it holds no
+     * lock afterwards, so a holder's saves and other servers' claims go on as before. Null when the player has no row.
+     */
+    fun read(playerId: UUID): StoredRow? = withConnection { connection ->
+        connection.prepareStatement(READ).use { statement ->
+            statement.setObject(1, playerId)
+            statement.executeQuery().use { row -> if (row.next()) StoredRow(row.getInt(1), row.getBytes(2)) else null }
+        }
+    }
+
     /** One round trip, reconnecting first if the last call broke the connection. */
     fun ping() = withConnection { it.execute("SELECT 1") }
 
@@ -235,6 +249,7 @@ internal class PlayerDataStore(private val connect: () -> Connection) : AutoClos
                 WHERE player_id = ? AND owner_session IS NOT NULL AND NOT EXISTS (SELECT 1 FROM claimed)
         """
         private const val RELEASE = "UPDATE neoplayersync_player SET $CLEAR_OWNER $OWNED_BY_SESSION"
+        internal const val READ = "SELECT schema_version, data FROM neoplayersync_player WHERE player_id = ?"
         private val HEARTBEAT = "UPDATE neoplayersync_player SET lease_until = $NEW_LEASE WHERE owner_session = ANY(?)"
     }
 }

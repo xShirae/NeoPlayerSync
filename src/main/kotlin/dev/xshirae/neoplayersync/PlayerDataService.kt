@@ -1,17 +1,20 @@
 package dev.xshirae.neoplayersync
 
+import dev.xshirae.neoplayersync.api.NeoPlayerSyncApi
 import com.google.gson.JsonObject
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.network.chat.Component
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.server.network.ServerConfigurationPacketListenerImpl
+import net.minecraft.util.Util
 import net.minecraft.world.inventory.AbstractContainerMenu
 import net.minecraft.world.inventory.ContainerListener
 import net.minecraft.world.item.ItemStack
 import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent
 import java.nio.file.Files
+import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -75,6 +78,15 @@ internal class PlayerDataService(
     private val refusedAtLoad = HashSet<UUID>()
     private var lastBacklogWarningNanos: Long? = null
     private var ping: CompletableFuture<Long>? = null
+    /** Reads share the claims thread, so they never delay or reorder saves, or hold back lease renewals. */
+    private val storedReader = StoredPlayerReader(
+        store = claimStore,
+        executor = claimThread,
+        decoder = Util.backgroundExecutor(),
+        fixer = server.fixerUpper,
+        serverThread = server,
+        timeoutMillis = TimeUnit.SECONDS.toMillis(COMMAND_WAIT_SECONDS),
+    )
 
     val inventorySavesWaiting: Int get() = inventorySaves.size + itemDataSaves.size
     val heldPlayers: Int get() = sessions.size
@@ -147,9 +159,9 @@ internal class PlayerDataService(
         val saved = session.unshiftedSave ?: return
         session.unshiftedSave = null
         val sinceClaimMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - session.claimedAtNanos)
-        player.persistentData.put(NeoPlayerSync.RESTORED_TAG, CompoundTag().apply {
-            putLong(NeoPlayerSync.SAVED_GAME_TIME, saved.savedTick)
-            putLong(NeoPlayerSync.ELAPSED_MILLIS, saved.elapsedMillis + sinceClaimMillis)
+        player.persistentData.put(NeoPlayerSyncApi.RESTORED_TAG, CompoundTag().apply {
+            putLong(NeoPlayerSyncApi.SAVED_GAME_TIME, saved.savedTick)
+            putLong(NeoPlayerSyncApi.ELAPSED_MILLIS, saved.elapsedMillis + sinceClaimMillis)
         })
     }
 
@@ -286,6 +298,9 @@ internal class PlayerDataService(
         // The timeout goes on a copy, so the shared query counts as running until the lease thread finishes it.
         return running.copy().orTimeout(COMMAND_WAIT_SECONDS, TimeUnit.SECONDS)
     }
+
+    /** See [dev.xshirae.neoplayersync.api.NeoPlayerSyncApi.readStoredPlayer]. */
+    fun readStoredPlayer(playerId: UUID): CompletableFuture<Optional<CompoundTag>> = storedReader.read(playerId)
 
     /**
      * Saves every player in the world now, then waits off the server thread until those saves reach the database.

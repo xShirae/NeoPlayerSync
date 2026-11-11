@@ -1,5 +1,6 @@
 package dev.xshirae.neoplayersync
 
+import dev.xshirae.neoplayersync.api.NeoPlayerSyncApi
 import com.mojang.authlib.GameProfile
 import net.minecraft.gametest.framework.GameTestHelper
 import net.minecraft.core.component.DataComponents
@@ -606,10 +607,10 @@ object PlayerDataSyncGameTests {
         val (player, seen) = loadAndWatch("restored", savedTick = 5_000_000L, elapsedMillis = 5_000L)
         helper.assertTrue(seen.size == 1, "Other mods should see the tag once, saw ${seen.size}")
         val tag = seen.single()
-        helper.assertTrue(tag.getLongOr(NeoPlayerSync.SAVED_GAME_TIME, -1L) == 5_000_000L, "The tag should name the old server's clock: $tag")
-        val elapsed = tag.getLongOr(NeoPlayerSync.ELAPSED_MILLIS, -1L)
+        helper.assertTrue(tag.getLongOr(NeoPlayerSyncApi.SAVED_GAME_TIME, -1L) == 5_000_000L, "The tag should name the old server's clock: $tag")
+        val elapsed = tag.getLongOr(NeoPlayerSyncApi.ELAPSED_MILLIS, -1L)
         helper.assertTrue(elapsed in 5_000L..6_000L, "The tag should count the save's age and the join, was $elapsed")
-        helper.assertTrue(!player.persistentData.contains(NeoPlayerSync.RESTORED_TAG), "The tag must be gone before anything saves it")
+        helper.assertTrue(!player.persistentData.contains(NeoPlayerSyncApi.RESTORED_TAG), "The tag must be gone before anything saves it")
         finish()
         helper.succeed()
     }

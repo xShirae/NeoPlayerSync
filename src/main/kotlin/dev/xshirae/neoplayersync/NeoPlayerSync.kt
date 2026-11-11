@@ -21,18 +21,6 @@ class NeoPlayerSync(modBus: IEventBus, modContainer: ModContainer) {
         const val MOD_ID = "neoplayersync"
         const val CONFIG_FILE = "neoplayersync.toml"
 
-        /**
-         * Other mods read this compound during [net.neoforged.neoforge.event.entity.player.PlayerEvent.LoadFromFile]
-         * after NeoPlayerSync loads the player's stored character. It holds [SAVED_GAME_TIME] and [ELAPSED_MILLIS].
-         */
-        const val RESTORED_TAG = "$MOD_ID:restored"
-
-        /** The overworld game time on the server that saved the character. */
-        const val SAVED_GAME_TIME = "saved_game_time"
-
-        /** Real time since that save, including the join. The database's clock times it up to the claim. */
-        const val ELAPSED_MILLIS = "elapsed_millis"
-
         @JvmField
         val LOGGER: Logger = LogUtils.getLogger()
 
