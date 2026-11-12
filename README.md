@@ -108,6 +108,10 @@ ssl_root_cert = "config/postgres-ca.crt"
 
 The database's certificate must name the address in `host`. A relative path starts from the server folder. On Windows, use forward slashes, like `"C:/certs/ca.crt"`. A backslash breaks the config file.
 
+## Database connections
+
+Each server keeps 3 connections open to PostgreSQL. One loads players as they join and answers other mods' reads, one sends their saves, and one renews the server's hold on the players it has. Set `max_connections` in PostgreSQL to at least 3 per backend, plus room for anything else that uses the database.
+
 ## For mod developers
 
 Most mods need no changes. NeoPlayerSync moves your player attachments and persistent data with the player. It leaves behind anything in a world save (`SavedData`) or under your own key in the player file. To make data travel, keep it in a player attachment.
@@ -156,37 +160,48 @@ public static void onLoad(PlayerEvent.LoadFromFile event) {
 
 Without NeoPlayerSync installed, the tag never appears and your listener does nothing.
 
-You can type the names yourself, as above, or use `NeoPlayerSyncApi.RESTORED_TAG`, `SAVED_GAME_TIME` and `ELAPSED_MILLIS`. Your compiler copies those names into your mod, so they work without NeoPlayerSync installed and need no `isLoaded` check.
+You can type the names yourself, as above, or use `NeoPlayerSyncApi.RESTORED_TAG`, `SAVED_GAME_TIME` and `ELAPSED_MILLIS` from the [API](#read-a-player-who-isnt-here). Your compiler copies those names into your mod, so they work without NeoPlayerSync installed and need no `isLoaded` check.
 
 ### Read a player who isn't here
 
-Say you want a command that shows another player's stats while that player is offline or on another server. `NeoPlayerSyncApi`, in the `dev.xshirae.neoplayersync.api` package, reads the copy of the player that the database holds. Reading doesn't lock the player: they can still join any server, and the server they're on keeps saving them.
+`NeoPlayerSyncApi` reads a player's save from the database, even when that player is offline or on another server. You could use it for a command that shows someone's stats. Reading doesn't lock the player, so they can still join any server.
 
-| Call | What you get |
+Add it to your `build.gradle`. The API needs NeoPlayerSync 1.2.0 or newer:
+
+```groovy
+repositories {
+    maven {
+        url = 'https://api.modrinth.com/maven'
+        content { includeGroup 'maven.modrinth' }
+    }
+}
+
+dependencies {
+    compileOnly 'maven.modrinth:neoplayersync:1.2.0'
+}
+```
+
+`compileOnly` lets your mod run without NeoPlayerSync. If your mod needs it, use `implementation` and mark `neoplayersync` as required in your `neoforge.mods.toml`.
+
+`NeoPlayerSyncApi` lives in `dev.xshirae.neoplayersync.api` and has two calls:
+
+| Call | Returns |
 | --- | --- |
-| `isDatabaseEnabled()` | `true` if this server keeps players in the database. `false` with `enabled = false`, in singleplayer or LAN, and while the server isn't running |
-| `readStoredPlayer(UUID)` | A `CompletableFuture<Optional<CompoundTag>>` with the player's save file, upgraded to this Minecraft version the way vanilla's `PlayerDataStorage.load` upgrades a `.dat` file |
+| `isDatabaseEnabled()` | `true` if this server stores players in the database. `false` with `enabled = false`, in singleplayer or LAN, or while the server isn't running |
+| `readStoredPlayer(UUID)` | a `CompletableFuture<Optional<CompoundTag>>` holding the player's save file, upgraded to this Minecraft version the way vanilla upgrades a `.dat` file |
 
-- Call it from the server thread, and your callbacks run there too.
-- An empty result means the database has nothing for this player yet. A player who hasn't joined since you turned the database on may still have a `playerdata/<uuid>.dat` file on one of your servers. You decide whether to look there.
-- If `isDatabaseEnabled()` is `false`, this server keeps players in local files, so read `playerdata/<uuid>.dat`.
-- A player on another server may have up to a minute of changes the database doesn't have yet. For a player on your own server, read the live player.
-- The tag is your copy. Editing it changes nothing.
-- Read one player when someone asks. If you read every player at once, joining players wait.
+- Call it on the server thread. Your callbacks run there too.
+- An empty result means the database has nothing for that player yet. If they haven't joined since you turned the database on, their save may still be in `playerdata/<uuid>.dat` on one of your servers.
+- If `isDatabaseEnabled()` is `false`, read `playerdata/<uuid>.dat` instead.
+- A player on another server may have up to a minute of changes the database doesn't have yet. For a player on your server, read the live player.
+- The result is read-only.
+- Read one player when someone asks. Reading everyone at once makes joining players wait.
 
-If the read fails, the future fails with an `IllegalStateException` that says why. You never get a blank player instead. It fails when:
+When a read fails, the future fails with an `IllegalStateException` that says why. You never get a blank player. Reads fail when the database is off or the server isn't running, a newer NeoPlayerSync or Minecraft saved the player, the save is broken, or the database errors or takes over 20 seconds.
 
-- the database is off, or the server isn't running
-- a newer NeoPlayerSync or Minecraft saved the player
-- the saved data is broken
-- the database returns an error or takes more than 20 seconds
-
-Only the `api` package and the `neoplayersync:restored` tag are public. The rest of the mod can change in any release. `NeoPlayerSyncApi.API_VERSION` is 1, and goes up only when a change would break mods built against the old API. Your mod reads the installed version when it runs, so you can check it before you call anything newer.
-
-To keep NeoPlayerSync optional, check `ModList.get().isLoaded("neoplayersync")` first, and put every API call in a class of its own. Java loads that class the first time your code calls it, so it stays unloaded when NeoPlayerSync is missing:
+To keep NeoPlayerSync optional, put your API calls in a class of their own and call it only after `ModList.get().isLoaded("neoplayersync")` returns `true`. Java loads that class on its first use, so your mod still runs without NeoPlayerSync:
 
 ```java
-// Java loads this class only when NeoPlayerSync is installed.
 final class StoredPlayers {
     static CompletableFuture<Optional<CompoundTag>> read(UUID playerId) {
         return NeoPlayerSyncApi.readStoredPlayer(playerId);
@@ -200,9 +215,7 @@ final class StoredPlayers {
 boolean useDatabase = ModList.get().isLoaded("neoplayersync") && StoredPlayers.databaseEnabled();
 ```
 
-### Database connections
-
-Each server keeps 3 connections open to PostgreSQL. One loads players as they join and serves API reads, one sends their saves, and one renews the server's hold on the players it has. Set `max_connections` in PostgreSQL to at least 3 per backend, plus room for anything else that uses the database.
+Only the `api` package and the `neoplayersync:restored` tag are public. The rest can change in any release. `NeoPlayerSyncApi.API_VERSION` is 1 and goes up only when a change breaks mods built for an older API. Your mod reads it at runtime, so you can check it before calling anything newer.
 
 ## Building
 
